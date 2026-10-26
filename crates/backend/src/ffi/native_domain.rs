@@ -971,8 +971,9 @@ impl LifecycleDomain {
     /// the pre-publish in-flight readers the write acquisition drains and
     /// the post-publish admissions that wait for the section to end). The
     /// closure runs under lifecycle write, so it may only take inner-leaf
-    /// locks (DashMap shards — legal under lifecycle→shard order); it must
-    /// never admit, begin control, or touch native entry points. On
+    /// locks (DashMap shards and the object-lifetime lock — legal under
+    /// lifecycle→leaf order); it must never admit, begin control, or touch
+    /// native entry points. On
     /// exhaustion the purge does NOT run: fail closed to `Uncertain`, like
     /// a refused cycle.
     pub(in crate::ffi) fn publish_open_with_purge(

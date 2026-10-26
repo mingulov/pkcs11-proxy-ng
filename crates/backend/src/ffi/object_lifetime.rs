@@ -27,9 +27,12 @@
 //! creating calls, destroys, `FindObjects`, and session closes hold
 //! it across the native call plus record maintenance, so an object
 //! is never provider-visible while unrecorded. Finalize/re-Initialize
-//! likewise hold it across the native call and the publish purge
-//! (their lifecycle seals already drained ordinary work, so holding
-//! the leaf there cannot cycle with admitted mints).
+//! never hold it across their native lifecycle calls: their
+//! abandon/publish paths re-acquire lifecycle write, so holding the
+//! leaf into either would invert the order above against an admitted
+//! mint holding lifecycle read. Instead the publish critical sections
+//! (`publish_open_with_purge` / `publish_finalized_with_purge`) take
+//! it briefly to clear the table alongside the incarnation purge.
 
 use std::collections::HashMap;
 use std::sync::Mutex;

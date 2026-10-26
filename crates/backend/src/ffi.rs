@@ -501,11 +501,12 @@ impl FfiBackend {
         // An `enter_finalizing` failure drops the seal through the Drop
         // backstop, abandoning the seal before the error propagates.
         seal.enter_finalizing()?;
-        // Lifetime lock across the native Finalize + purge below. The
-        // seal already drained and sealed ordinary work, so no admitted
-        // mint can be waiting on this lock while holding lifecycle read
-        // (the usual lifecycle -> lifetime order cannot cycle here).
-        let mut lifetimes = self.object_lifetimes.lock_entries();
+        // No lifetime lock across the native call: lifecycle write is
+        // acquired again by abandon/publish below, and holding the leaf
+        // lifetime lock into either would invert the global
+        // lifecycle -> lifetime order (an admitted mint holds lifecycle
+        // read while waiting for the lifetime lock). The purge takes
+        // the lifetime lock briefly inside the publish section instead.
         // Control choke: Finalize holds no read (the seal above took short
         // writes only, never read) — the choke takes no guard, structurally.
         let outcome =
@@ -534,6 +535,9 @@ impl FfiBackend {
         // and closes its sessions. Once the underlying module accepts
         // C_Finalize, every cached session binding is out of scope.
         self.lifecycle_domain.publish_finalized_with_purge(seal, || {
+            // Brief leaf hold under the publish write (lifecycle ->
+            // lifetime), mirroring the incarnation purge above it.
+            let mut lifetimes = self.object_lifetimes.lock_entries();
             self.drop_all_mech_cache_in(&mut lifetimes);
         })?;
         Ok(())
@@ -602,9 +606,12 @@ impl Pkcs11Backend for FfiBackend {
         // a failed `C_Initialize` ran provider code, so the reservation
         // must poison instead of recycling.
         self.lifecycle.note_init_attempted();
-        // Lifetime lock across the native Initialize + purge below
-        // (begin above drained/sealed ordinary work, as in Finalize).
-        let mut lifetimes = self.object_lifetimes.lock_entries();
+        // No lifetime lock across the native call: abandon/publish below
+        // re-acquire lifecycle write, and holding the leaf lifetime lock
+        // into either would invert the global lifecycle -> lifetime
+        // order (an admitted mint holds lifecycle read while waiting
+        // for the lifetime lock — see the overlap regression test). The
+        // purge takes the lifetime lock briefly inside publish instead.
         // Control choke: Initialize takes the write lock (above) while
         // holding no read — the choke takes no guard, structurally.
         let outcome =
@@ -638,6 +645,11 @@ impl Pkcs11Backend for FfiBackend {
         let generation_changed = self.lifecycle.current_generation() != generation_before;
         self.lifecycle_domain.publish_open_with_purge(init_control, || {
             if generation_changed {
+                // Brief leaf hold under the publish write (lifecycle
+                // -> lifetime): the new incarnation starts with a clean
+                // lifetime table inside the same section as the rest of
+                // the incarnation purge.
+                let mut lifetimes = self.object_lifetimes.lock_entries();
                 self.drop_all_mech_cache_in(&mut lifetimes);
             }
         })?;
@@ -2169,6 +2181,173 @@ mod tests {
         functions.C_Initialize = Some(initialize_fails);
         assert_eq!(backend.initialize().unwrap_err(), CkRv::GENERAL_ERROR);
         backend.lifecycle_domain.admit_ordinary().expect("live incarnation still admits");
+    }
+
+    // --- Overlapping-Initialize / admitted-mint deadlock regression ---
+    //
+    // Two Initialize calls overlap: A parks inside its native call, B
+    // begins behind A. A then succeeds and publishes `Open`, an ordinary
+    // mint admits (lifecycle read) and reaches for the object-lifetime
+    // lock, and B's native call returns ALREADY_INITIALIZED so B must
+    // abandon (lifecycle write). If B holds the lifetime lock across its
+    // native call — the shape this pins against — the cycle is
+    // permanent: B waits for lifecycle write behind the mint's read
+    // while the mint waits for B's lifetime lock. All three calls must
+    // complete; every wait below is channel-bounded so the buggy shape
+    // fails fast instead of hanging the suite (workers are detached:
+    // a deadlocked run leaks its threads and reports, never wedges).
+
+    static OVERLAP_INIT_CALLS: std::sync::atomic::AtomicUsize =
+        std::sync::atomic::AtomicUsize::new(0);
+    static OVERLAP_INIT_FIRST_GATE: std::sync::Mutex<
+        Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>,
+    > = std::sync::Mutex::new(None);
+    static OVERLAP_INIT_SECOND_GATE: std::sync::Mutex<
+        Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>,
+    > = std::sync::Mutex::new(None);
+    static OVERLAP_INIT_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn park_overlap_gate(
+        gate: &std::sync::Mutex<
+            Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>,
+        >,
+    ) -> bool {
+        let gate = gate.lock().unwrap().take();
+        match gate {
+            Some((entered, release)) => {
+                let _ = entered.send(());
+                // Bounded: a test bug (release never sent) fails the
+                // stub loudly instead of parking the suite forever.
+                release.recv_timeout(std::time::Duration::from_secs(10)).is_ok()
+            }
+            None => false,
+        }
+    }
+
+    unsafe extern "C" fn initialize_overlapping_parkable(
+        _: *mut std::ffi::c_void,
+    ) -> cryptoki_sys::CK_RV {
+        // First overlapping call succeeds; the second observes the
+        // incarnation A opened and reports already-initialized.
+        match OVERLAP_INIT_CALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst) {
+            0 => {
+                if park_overlap_gate(&OVERLAP_INIT_FIRST_GATE) {
+                    cryptoki_sys::CKR_OK
+                } else {
+                    cryptoki_sys::CKR_FUNCTION_FAILED
+                }
+            }
+            _ => {
+                if park_overlap_gate(&OVERLAP_INIT_SECOND_GATE) {
+                    cryptoki_sys::CKR_CRYPTOKI_ALREADY_INITIALIZED
+                } else {
+                    cryptoki_sys::CKR_FUNCTION_FAILED
+                }
+            }
+        }
+    }
+
+    unsafe extern "C" fn create_object_overlap_ok(
+        _session: cryptoki_sys::CK_SESSION_HANDLE,
+        _template: cryptoki_sys::CK_ATTRIBUTE_PTR,
+        _count: cryptoki_sys::CK_ULONG,
+        handle: *mut cryptoki_sys::CK_OBJECT_HANDLE,
+    ) -> cryptoki_sys::CK_RV {
+        if !handle.is_null() {
+            unsafe { *handle = 43 };
+        }
+        cryptoki_sys::CKR_OK
+    }
+
+    #[test]
+    fn overlapping_initialize_abandon_does_not_deadlock_admitted_mint() {
+        use std::sync::atomic::Ordering;
+        use std::sync::{Arc, mpsc};
+        use std::time::Duration;
+        let _lock = OVERLAP_INIT_TEST_LOCK.lock().unwrap();
+        OVERLAP_INIT_CALLS.store(0, Ordering::SeqCst);
+        let (first_entered_tx, first_entered_rx) = mpsc::channel();
+        let (first_release_tx, first_release_rx) = mpsc::channel();
+        let (second_entered_tx, second_entered_rx) = mpsc::channel();
+        let (second_release_tx, second_release_rx) = mpsc::channel();
+        *OVERLAP_INIT_FIRST_GATE.lock().unwrap() = Some((first_entered_tx, first_release_rx));
+        *OVERLAP_INIT_SECOND_GATE.lock().unwrap() = Some((second_entered_tx, second_release_rx));
+
+        let mut functions = Box::new(cryptoki_sys::CK_FUNCTION_LIST::default());
+        functions.C_Initialize = Some(initialize_overlapping_parkable);
+        functions.C_Finalize = Some(finalize_ok);
+        functions.C_CreateObject = Some(create_object_overlap_ok);
+        // Leaked on purpose: detached workers must never meet a freed
+        // table, including on the RED timeout path where the buggy
+        // shape leaves them deadlocked past the end of this test.
+        let func_list = Box::leak(functions) as *mut cryptoki_sys::CK_FUNCTION_LIST;
+        let backend = Arc::new(FfiBackend::test_backend_with_tables(func_list, None, None));
+
+        let (a_tx, a_rx) = mpsc::channel();
+        let (b_tx, b_rx) = mpsc::channel();
+        let (mint_tx, mint_rx) = mpsc::channel();
+
+        // Initializer A parks inside its native call.
+        {
+            let backend = Arc::clone(&backend);
+            std::thread::spawn(move || {
+                let _ = a_tx.send(backend.initialize());
+            });
+        }
+        first_entered_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("initializer A parks inside native C_Initialize");
+        // Initializer B overlaps A. B signals nothing before its native
+        // call in the buggy shape (it blocks on the lifetime lock A
+        // holds), so this settle window is what guarantees B began
+        // before A publishes — the same unobservable-queue pattern as
+        // `queued_writer_stalls_new_admissions`.
+        {
+            let backend = Arc::clone(&backend);
+            std::thread::spawn(move || {
+                let _ = b_tx.send(backend.initialize());
+            });
+        }
+        std::thread::sleep(Duration::from_millis(300));
+        // A succeeds and publishes Open.
+        first_release_tx.send(()).expect("release initializer A");
+        assert_eq!(
+            a_rx.recv_timeout(Duration::from_secs(5)).expect("initializer A must complete"),
+            Ok(())
+        );
+        // B is inside its native call in both shapes now (the buggy B
+        // acquires the lifetime lock the moment A releases it).
+        second_entered_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("initializer B parks inside native C_Initialize");
+        // The admitted mint races B's abandon path: it holds lifecycle
+        // read while reaching for the lifetime lock.
+        {
+            let backend = Arc::clone(&backend);
+            std::thread::spawn(move || {
+                let _ = mint_tx.send(backend.create_object(CkSessionHandle(7), Some(&[])));
+            });
+        }
+        std::thread::sleep(Duration::from_millis(300));
+        second_release_tx.send(()).expect("release initializer B into its abandon path");
+        assert_eq!(
+            b_rx.recv_timeout(Duration::from_secs(10)).expect(
+                "initializer B abandon must complete: deadlock \u{2014} B waits for \
+                 lifecycle write while holding the lifetime lock the admitted mint waits for"
+            ),
+            Err(CkRv::CRYPTOKI_ALREADY_INITIALIZED)
+        );
+        assert_eq!(
+            mint_rx.recv_timeout(Duration::from_secs(10)).expect("admitted mint must complete"),
+            Ok(CkObjectHandle(43))
+        );
+        backend.lifecycle_domain.admit_ordinary().expect("domain stays open after B abandons");
+        // The publish-move keeps purge semantics: the mint's lifetime is
+        // tracked under the live incarnation, and a successful Finalize
+        // still clears the table at publish.
+        assert!(backend.object_lifetime(CkSessionHandle(7), CkObjectHandle(43)).is_some());
+        backend.finalize().expect("finalize succeeds");
+        assert_eq!(backend.object_lifetime(CkSessionHandle(7), CkObjectHandle(43)), None);
     }
 
     fn seed_cache(backend: &FfiBackend) {
