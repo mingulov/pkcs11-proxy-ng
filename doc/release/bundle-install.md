@@ -6,7 +6,7 @@ checkout and no `cargo` build. It covers one daemon plus one logical
 client in one trusted security domain — the
 [supported testing scope](beta-support-matrix.md#unreleased-testing-scope).
 For design background and qualification status, see the
-[release notes](v0.3.0-release-notes.md) shipped in the same archive.
+[release notes](v0.3.1-release-notes.md) shipped in the same archive.
 
 Windows operators: the Windows ZIP carries its own
 `proxy.toml.template` plus the `Run-Pkcs11ProxyNg.ps1` supervisor, and
@@ -17,8 +17,8 @@ macOS tarballs.
 ## 1. Unpack and inspect
 
 ```bash
-tar -xzf pkcs11-proxy-ng-v0.3.0-x86_64-unknown-linux-gnu.tar.gz
-cd pkcs11-proxy-ng-v0.3.0-x86_64-unknown-linux-gnu
+tar -xzf pkcs11-proxy-ng-v0.3.1-x86_64-unknown-linux-gnu.tar.gz
+cd pkcs11-proxy-ng-v0.3.1-x86_64-unknown-linux-gnu
 ls bin lib examples/configs doc/release
 ```
 

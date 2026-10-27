@@ -7,11 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-10-27
+
+v0.3.1 is a release-process release with no proxy behavior changes: it
+simplifies the release path and leaves the v0.3.0 stabilization
+baseline otherwise intact. The provider-matrix qualification planned
+for this version did not land; see the [release
+notes](doc/release/v0.3.1-release-notes.md).
+
 ### Changed
 
-- Simplify the release path for development speed (targeted at v0.3.1):
-  no environment approvals (`release-tag`, `crates-io`, `release`) and
-  no provider-qualification evidence on any of `cut-release.yml`,
+- Simplify the release path for development speed: no environment
+  approvals (`release-tag`, `crates-io`, `release`) and no
+  provider-qualification evidence on any of `cut-release.yml`,
   `publish.yml`, or `release.yml`. The dispatcher is the sole
   authorizer; the eight receipt gates, tag/CI binding, registry
   verification, and the non-destructive asset compare are unchanged.
