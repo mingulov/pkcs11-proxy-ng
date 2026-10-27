@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-27
+
+v0.3.0 is a stabilization release with no new features: it ships the
+engineering-audit remediation campaign on top of v0.2.2 as a stable baseline
+for the provider-matrix qualification that follows in v0.3.1. See the
+[release notes](doc/release/v0.3.0-release-notes.md) and
+[scope](doc/release/v0.3.0-scope.md).
+
 ### Security
 
 - Refresh compatible dependency locks, including rustls 0.23.46 and
