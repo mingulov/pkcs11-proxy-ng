@@ -42,7 +42,7 @@ def require_registry_provenance(path: Path, inventory_path: Path,
                                 package_dir: Path, binaries_dir: Path) -> dict:
     """Bind a registry build claim to exact source archives and staged files.
 
-    Callers must separately enforce the publication/approval gates. The
+    Callers must separately enforce the publication checks. The
     package directory is the downloaded, checksum-verified source set used by
     the binary build, and the binary directory is the set proposed for upload.
     """

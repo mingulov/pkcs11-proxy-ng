@@ -119,8 +119,8 @@ jobs:
           set -euo pipefail
           # The run's own head feeds --head-sha below: pre-fix tag
           # scripts require the flag (tautology for them), new scripts
-          # ignore it. Tag binding comes from the artifact name plus
-          # evidence-verify below, never from the dispatch head.
+          # ignore it. Tag binding comes from the exact-name
+          # candidate selection below, never from the dispatch head.
           RUN_JSON="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${CANDIDATE_RUN_ID}" \
             --jq '{id: .id, event: .event, head_sha: .head_sha, path: .path}')"
           ART_JSON="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${CANDIDATE_RUN_ID}/artifacts" \
@@ -839,8 +839,17 @@ jobs:
           # The manifest is a published asset but cannot list itself (see
           # above), so compare it by bytes: missing stages it, identical
           # skips it, anything else refuses like any divergent asset.
+          # Pre-0.3.1 releases additionally list retired qualification
+          # assets; a manifest that differs only by those legacy
+          # entries is retained as-is instead of refusing.
           if [ -f existing/files/assets.json ]; then
-            if ! cmp -s existing/files/assets.json prepared/assets.json; then
+            if cmp -s existing/files/assets.json prepared/assets.json; then
+              :
+            elif python3 scripts/release_checks.py manifest-compatible \
+                --existing existing/files/assets.json \
+                --prepared prepared/assets.json; then
+              echo "released assets.json differs only by retired pre-0.3.1 entries; retaining released manifest"
+            else
               echo "::error::released assets.json differs from the prepared manifest; refusing to replace"
               exit 1
             fi

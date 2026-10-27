@@ -14,7 +14,7 @@ Build, test, and release scripts, with their callers. Paths are relative to
 | `packaging-smoke.sh` | `ci.yml` and `test-matrix.sh`: packaging/version consistency |
 | `musl-dynamic-link-flags.sh` | `ci.yml` and `run-musl-test.sh`: common musl link flags |
 | `ci-direct-vs-proxy.py` | `cross-platform.yml`: native direct-versus-proxied provider comparisons |
-| `ci-package-smoke.py` | `ci.yml` smoke lanes: reusable installed/extracted artifact contract (APK set, Linux tarball, Windows ZIP); reused for registry bundles before asset approval |
+| `ci-package-smoke.py` | `ci.yml` smoke lanes: reusable installed/extracted artifact contract (APK set, Linux tarball, Windows ZIP); reused for registry bundles before asset publication |
 | `test-matrix.sh` | `nightly.yml` and `Dockerfile.test`: local CI gates and provider/consumer lanes |
 | `run-test-tiers.sh` | `nightly.yml`: live test lanes; `all` is the manual canonical `cargo test --workspace --locked` pass, unit/integration/regression are scoped subsets |
 | `run-script-tests.py` | `ci.yml`: complete Python regression discovery with mandatory prerequisites and failure on zero work or unexpected skips; optional exact local module selection and timing receipts |
@@ -23,7 +23,7 @@ Build, test, and release scripts, with their callers. Paths are relative to
 | `verify-release-subject.sh` | `publish.yml` and `release.yml`: validate the tag subject and version mirrors |
 | `release-dry-run.sh` | Local Linux packaging check and staging; `release.yml` now builds from registry sources instead |
 | `release-windows.sh` | Local Windows ZIP staging; `release.yml` now builds from registry sources instead |
-| `release_checks.py` (`candidate-name`, `evidence-bind`, `evidence-verify`, `evidence-select`, `assets-compare`, `tag-evidence`, `write-receipt`, `environments-preflight`, `qualification-preflight`) | `publish.yml` and `release.yml`: pre-auth candidate identity, cross-run evidence selection, non-destructive asset comparison, annotated-tag evidence; `cut-release.yml`: quality-receipt generation; all three release workflows: read-only environment-protection and provider-qualification preflights before credentials/mutations |
+| `release_checks.py` (`candidate-name`, `evidence-select`, `assets-compare`, `manifest-compatible`, `tag-evidence`, `write-receipt`) | `publish.yml` and `release.yml`: pre-auth candidate identity, cross-run evidence selection, non-destructive asset comparison, release-manifest compatibility, annotated-tag evidence; `cut-release.yml`: quality-receipt generation |
 | `release/support_matrix.py` | `ci.yml`: validate `doc/release/pool-evidence.json` and regenerate/`--check` the marked table in `doc/release/beta-support-matrix.md` |
 
 The GitLab pipeline builds the Alpine and Amazon carrier images through their
