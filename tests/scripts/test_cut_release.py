@@ -1,10 +1,12 @@
 """Release orchestrator tests (cut-release.yml + write-receipt helper).
 
-RED-FIRST: these tests describe the GUI-dispatched release pipeline:
-verify the eight receipt gates plus subject/version/CHANGELOG/tag
-preconditions on main, cut an approval-gated receipt-only commit with
-an annotated tag, then dispatch publish.yml with the inputs passed
-through once. They fail until the workflow and the helper exist.
+These tests describe the GUI-dispatched release pipeline: verify the
+eight receipt gates plus subject/version/CHANGELOG/tag preconditions
+on main, cut a receipt-only commit with an annotated tag (no approval
+gates: the dispatcher is the sole operator), then dispatch publish.yml
+with the inputs passed through once. Environment protections and
+provider-qualification evidence were removed in 0.3.1; they can be
+restored from history if a strict flow is ever needed again (>=0.9).
 """
 
 from __future__ import annotations
@@ -23,7 +25,6 @@ except ImportError:  # pragma: no cover - test env provides PyYAML
 ROOT = Path(__file__).resolve().parents[2]
 CUT_YML = ROOT / ".github" / "workflows" / "cut-release.yml"
 
-RELEASE_TAG_ENV = "release-tag"
 RELEASE_RUST = "1.98.1"
 MSRV = "1.88.0"
 MISE_ACTION = "jdx/mise-action@"
@@ -75,15 +76,15 @@ class CutTriggerTests(unittest.TestCase):
         package = triggers["workflow_dispatch"]["inputs"]["package"]
         self.assertEqual(package.get("default"), "workspace")
 
-    def test_qualification_inputs_present(self):
+    def test_no_qualification_inputs(self):
         triggers = workflow_triggers(load_workflow())
         inputs = triggers["workflow_dispatch"]["inputs"]
-        self.assertIn("qualification-url", inputs)
-        self.assertIn("qualification-subject", inputs)
-        self.assertIn("qualification-run-id", inputs)
-        self.assertIn("qualification-framework", inputs)
-        self.assertIn("qualification-record-sha256", inputs)
-        self.assertIn("qualification-receipt-sha256", inputs)
+        for name in ("qualification-url", "qualification-subject",
+                     "qualification-run-id", "qualification-framework",
+                     "qualification-record-sha256",
+                     "qualification-receipt-sha256"):
+            with self.subTest(name=name):
+                self.assertNotIn(name, inputs)
 
 
 class CutVerifyTests(unittest.TestCase):
@@ -131,11 +132,21 @@ class CutVerifyTests(unittest.TestCase):
 
 
 class CutJobTests(unittest.TestCase):
-    def test_cut_needs_verify_under_release_tag_env(self):
+    def test_cut_needs_verify_without_environment_gate(self):
         workflow = load_workflow()
         job = workflow["jobs"]["cut"]
         self.assertEqual(job.get("needs"), ["verify"])
-        self.assertEqual(job.get("environment"), RELEASE_TAG_ENV)
+        self.assertIsNone(job.get("environment"))
+
+    def test_verify_has_no_environment_or_qualification_gates(self):
+        workflow = load_workflow()
+        run = run_text(workflow["jobs"]["verify"])
+        for marker in ("environments-preflight",
+                       "qualification-preflight",
+                       "provider-qualification",
+                       "QUALIFICATION_"):
+            with self.subTest(marker=marker):
+                self.assertNotIn(marker, run)
 
     def test_cut_rechecks_head_before_push(self):
         workflow = load_workflow()
@@ -203,13 +214,10 @@ class DispatchJobTests(unittest.TestCase):
         # No checkout in this job: gh must resolve the repo explicitly
         # or it dies with "fatal: not a git repository".
         self.assertIn('-R "${{ github.repository }}"', run)
-        for flag in ("mode=", "package=", "tag=",
-                     "qualification-url=", "qualification-subject=",
-                     "qualification-run-id=", "qualification-framework=",
-                     "qualification-record-sha256=",
-                     "qualification-receipt-sha256="):
+        for flag in ("mode=", "package=", "tag="):
             with self.subTest(flag=flag):
                 self.assertIn(flag, run)
+        self.assertNotIn("qualification-", run)
 
     def test_dispatch_has_actions_write(self):
         workflow = load_workflow()

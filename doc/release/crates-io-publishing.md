@@ -109,26 +109,19 @@ packaged artifacts work; they are not provider qualification.
 One GUI dispatch (Actions → cut-release → Run workflow) carries the
 whole pre-publication path, so the tag, the receipt, and the publish
 inputs are produced once instead of typed three times. Inputs:
-`version` (stable `MAJOR.MINOR.PATCH`, no `v` prefix), `mode`,
-`package`, and the full qualification identity — `qualification-url`,
-`qualification-subject`, `qualification-run-id`,
-`qualification-framework`, `qualification-record-sha256`, and
-`qualification-receipt-sha256` (required for upload modes; see the
-[binding contract](./qualification-binding-contract.md)). Prepare
-`main` first with a normal PR containing the dated `CHANGELOG.md`
-entry; the orchestrator adds or refreshes only the receipt.
+`version` (stable `MAJOR.MINOR.PATCH`, no `v` prefix), `mode`, and
+`package` — no approvals and no qualification identity (removed in
+0.3.1; the dispatcher is the sole authorizer). Prepare `main` first
+with a normal PR containing the dated `CHANGELOG.md` entry; the
+orchestrator adds or refreshes only the receipt.
 
 1. `verify` checks out `main`, validates the inputs, refuses if the
    tag already exists, runs all eight receipt gates (fmt, check,
    test, clippy, msrv, audit, deny, release_dry_run) plus the
-   subject/version/CHANGELOG/packaging-mirror checks, verifies the
-   provider qualification evidence against the verified subject with
-   the `qualification-preflight` gate, then writes
+   subject/version/CHANGELOG/packaging-mirror checks, then writes
    the quality receipt for the recorded HEAD SHA and uploads it.
-2. `cut` waits on the protected `release-tag` environment (create it
-   with required reviewers — this is the separate approval to tag),
-   re-verifies HEAD is unchanged and the tag still absent, commits
-   the receipt-only delta, re-verifies it with
+2. `cut` re-verifies HEAD is unchanged and the tag still absent,
+   commits the receipt-only delta, re-verifies it with
    `verify-quality-receipt.sh`, creates the annotated tag, pushes
    commit plus tag, then starts CI on the new tag (token pushes
    trigger no runs, and publish refuses until that aggregate is
@@ -139,8 +132,7 @@ entry; the orchestrator adds or refreshes only the receipt.
    `lewagon/wait-on-check-action` (success-only conclusions; red,
    missing, or timed-out CI refuses before anything dispatches),
    then runs `publish.yml` from the new tag with the inputs passed
-   through. Upload and release approvals still gate their own
-   environments there; nothing here bypasses them.
+   through.
 
 The cut job pushes with `GITHUB_TOKEN`, which works while `main` is
 unprotected (tag pushes from automation do not trigger the
@@ -157,53 +149,43 @@ missing → push the annotated tag manually, then dispatch.
 Manual dispatch only, run **from the tag** (or a ref whose HEAD equals
 the tag commit). Inputs: `mode` (`dry-run` default, `bootstrap`,
 `trusted`), `package` (`workspace` default, or exactly one crate),
-exact `tag`, and the full qualification identity
-(`qualification-url`, `qualification-subject`, `qualification-run-id`,
-`qualification-framework`, `qualification-record-sha256`,
-`qualification-receipt-sha256`) for upload modes. A tag
-push runs validation only and can never upload.
+and the exact `tag`. A tag push runs validation only and can never
+upload.
 
-1. Preflight validates ref/source/version/receipt/ancestry/qualification,
-   publishes the approval inputs to the run summary, verifies the
-   provider qualification evidence with the `qualification-preflight`
-   gate (see the [binding
-   contract](./qualification-binding-contract.md)), then requires the
-   tag commit to already carry a green fail-closed aggregate from a CI
-   run (reusable calls cannot schedule here, so publication reuses the
+1. Preflight validates ref/source/version/receipt/ancestry, publishes
+   the inputs to the run summary, then requires the tag commit to
+   already carry a green fail-closed aggregate from a CI run
+   (reusable calls cannot schedule here, so publication reuses the
    tag commit's own CI instead of re-running the matrix).
 2. The candidate job stages exactly one immutable pre-auth artifact,
    `crates-candidate-<tagCommit>-<runId>` — all eight archives,
-   inventory, SHA256SUMS, and the version-2 qualification-binding JSON
-   (frozen source/candidate identities plus the pinned qualification
-   receipt/record digests, run id, and framework) —
-   with overwrite disabled and 90-day retention. It refuses unless
-   the CI-built archives bind to the tag commit.
-3. The upload job (the only `id-token: write` holder, under the
-   protected `crates-io` environment) re-checks every guard, repackages
-   all eight archives without compiling, byte-compares them against the
-   pre-auth inventory, classifies registry state, uploads the bounded
-   selection in dependency order, and reads back published checksums.
-   Post-upload evidence is retained even on failure.
+   inventory, and SHA256SUMS — with overwrite disabled and 90-day
+   retention. It refuses unless the CI-built archives bind to the
+   tag commit.
+3. The upload job (the only `id-token: write` holder) re-checks every
+   guard, repackages all eight archives without compiling,
+   byte-compares them against the pre-auth inventory, classifies
+   registry state, uploads the bounded selection in dependency order,
+   and reads back published checksums. Post-upload evidence is
+   retained even on failure.
 4. A separate read-only job verifies all eight published checksums and
    runs full registry consumers, then emits explicit `complete=true`.
 
 Only that complete success may automatically call the release
 workflow. Partial publication never starts binaries.
 
-### Environments, bootstrap, and trust
+### Bootstrap and trust
 
-- `crates-io`: protected environment with required reviewers and tag
-  restrictions, bound to the source-specific qualification record
-  (immutable HTTPS URL, frozen-subject SHA, evidence run id,
-  framework commit, and pinned record/receipt digests — see the
-  [binding contract](./qualification-binding-contract.md)). Approval
-  happens against the preflight summary, never against descriptions. The
-  exact reviewer/ref contract for all three production environments
-  lives in the [protection
-  contract](./environment-protection-contract.md), and the
-  `environments-preflight` gate re-verifies the live readback before
-  any credential use or mutation; a missing environment, missing
-  reviewers, or a permissive/mismatched ref policy refuses there.
+No environment approvals gate any step: the maintainer dispatching
+the workflow is the sole authorizer (the `release-tag`, `crates-io`,
+and `release` environment protections plus the provider-qualification
+evidence they bound were removed in 0.3.1 for development speed; the
+retired contracts stay in
+[qualification-binding-contract.md](./qualification-binding-contract.md)
+and
+[environment-protection-contract.md](./environment-protection-contract.md),
+restorable from history if a gated flow is ever needed again).
+
 - First publication uses `bootstrap` mode with the
   `CARGO_REGISTRY_BOOTSTRAP_TOKEN` secret. Afterwards, configure one
   trusted-publishing trust record per crate (eight records) and use
@@ -220,20 +202,17 @@ workflow. Partial publication never starts binaries.
 
 No tag-push trigger. The workflow runs via API dispatch after
 explicit complete success (reusable calls cannot schedule here), or
-as an exact-tag manual retry with `candidate_run_id` plus matching
-qualification inputs; the manual path never republishes crates.
+as an exact-tag manual retry with `candidate_run_id`; the manual
+path never republishes crates.
 
 Recovery validates the referenced publish run (same repository,
 publish workflow path, manual event, tag-peeled head SHA) and
 requires exactly one matching unexpired pre-auth artifact through
 read-only access — missing, expired, or ambiguous evidence refuses,
 and expected hashes are never reconstructed from registry data.
-The job then re-verifies the provider qualification evidence with
-the `qualification-preflight` gate and rechecks source, tag object
-and peeled commit, receipt, qualification, candidate binding,
-registry state, and consumers before any binary job starts. The
-validated `qualification-record.json` and `qualification-receipt.json`
-bytes ship as durable release assets alongside provenance.
+The job then rechecks source, tag object and peeled commit,
+receipt, candidate binding, registry state, and consumers before
+any binary job starts.
 
 Binary jobs build both targets from the exact published crates.io
 archives plus their original packaged locks (checkout source is
@@ -242,18 +221,16 @@ never an input), generate notices, and stage deterministic bundles
 and no OIDC permission. Native Linux/Windows smokes run the
 staged bundles before publication.
 
-The final `publish` step runs under the separately approved
-protected `release` environment and is the only writer. Assets
-publish through one combined path: the prepared bundles and
-candidate evidence are compared against the exact-tag release —
-identical assets are retained, missing assets are added, and
-divergent bytes refuse with both digests named. Retries never
-replace or delete assets and never move tags; a retry where
-everything already matches uploads nothing.
+The final `publish` step is the only writer. Assets publish
+through one combined path: the prepared bundles and candidate
+evidence are compared against the exact-tag release — identical
+assets are retained, missing assets are added, and divergent bytes
+refuse with both digests named. Retries never replace or delete
+assets and never move tags; a retry where everything already
+matches uploads nothing.
 
 Every published bundle carries a Sigstore attestation binding it
-to the release tag, tag commit, and qualification (URL, subject,
-record/receipt digests, run id, and framework) — generated in
+to the release tag, tag commit, and candidate run — generated in
 the `publish` job after the compare gate, over the full prepared
 set including retained assets, so retries attest every bundle on
 the release, even when nothing new uploads (a complete
@@ -276,8 +253,8 @@ fixed workflow in place (a rerun replays the frozen file).
 ## Recovery
 
 - Individual member: dispatch `publish.yml` with `package` set to the
-  one crate name (same tag and qualification inputs). The upload job
-  prints the exact full follow-up dispatch command afterwards.
+  one crate name (same tag). The upload job prints the exact full
+  follow-up dispatch command afterwards.
 - Last-member recovery obeys the same complete-success rule: binaries
   start only after a later run verifies all eight plus consumers.
 - Partial state vs hash mismatch: `registry-verify` distinguishes
@@ -299,15 +276,15 @@ smoke logs, and staging evidence upload as run artifacts with
 90-day retention and overwrite disabled. Ninety days is a floor,
 not an archive: before it lapses, the maintainer must escrow a
 copy of the pre-auth candidate artifact (eight archives, inventory,
-SHA256SUMS, qualification binding) plus the published release
-assets into maintainer-controlled long-term storage, recorded in
-the release notes. Longer-term recovery from escrow is a
+SHA256SUMS) plus the published release assets into
+maintainer-controlled long-term storage, recorded in the release
+notes. Longer-term recovery from escrow is a
 separately reviewed procedure — there is no automatic
 reconstruction of expected hashes from registry data.
 
 ## Checklist pointer
 
-The freeze/tag/approval/receipt procedure, including the exact
+The freeze/tag/receipt procedure, including the exact
 verification commands and the per-release evidence boxes, lives in
 the [`0.x` beta release checklist](./0.x-beta-release-checklist.md).
 This guide explains the machinery; the checklist records the run.

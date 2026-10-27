@@ -1,5 +1,11 @@
 # Production environment protection contract
 
+> **RETIRED in 0.3.1.** Environment approvals were removed from the
+> release path for development speed; the dispatcher is the sole
+> authorizer (restorable from history if a gated flow is ever needed
+> again, e.g. >=0.9). This document is kept for historical reference
+> only; the workflows no longer implement it.
+
 The three production release jobs are each bound to a protected GitHub
 environment, and each pre-mutation job re-verifies that binding against
 a live API readback before any credential use or mutation:
