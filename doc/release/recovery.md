@@ -25,8 +25,10 @@ restarts publication.
    workflow file from `main` plus `scripts/release-upload.sh`
    (fetched from the workflow ref) — but every other helper
    (`release_checks.py`, smoke and verify scripts) still runs from
-   the tag checkout, so a fix to any of those requires re-cutting
-   the tag to include it.
+   the tag checkout, except the manifest-compatibility check, which
+   runs from the workflow-ref side checkout so pre-0.3.1 retries
+   work. A fix to any tag-checkout helper requires re-cutting the
+   tag to include it.
 2. **Dispatch inputs are exact.** `release.yml` accepts exactly two
    `workflow_dispatch` inputs — `tag` and `candidate_run_id`;
    anything else is rejected with HTTP 422. Recover them from the
