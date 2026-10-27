@@ -725,15 +725,21 @@ jobs:
           fetch-depth: 1
 
       # The tag checkout above predates scripts/release-upload.sh, so fetch
-      # just the script from the workflow ref (the same ref this file runs
-      # from) into a side directory; the tag checkout stays put for notes.
-      - name: Checkout uploader script from workflow ref
+      # just the uploader plus the release checks from the workflow ref
+      # (the same ref this file runs from) into a side directory; the
+      # tag checkout stays put for notes. The manifest-compatibility
+      # check must come from here: a pre-0.3.1 tag's own scripts lack
+      # the `manifest-compatible` command, which would fail the retry
+      # with `invalid choice` instead of tolerating legacy entries.
+      - name: Checkout uploader and release checks from workflow ref
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ github.sha }}
           fetch-depth: 1
           sparse-checkout: |
             scripts/release-upload.sh
+            scripts/release_checks.py
+            scripts/release/
           path: .release-uploader
 
       - name: Install Python for release checks
@@ -845,7 +851,8 @@ jobs:
           if [ -f existing/files/assets.json ]; then
             if cmp -s existing/files/assets.json prepared/assets.json; then
               :
-            elif python3 scripts/release_checks.py manifest-compatible \
+            elif python3 .release-uploader/scripts/release_checks.py \
+                manifest-compatible \
                 --existing existing/files/assets.json \
                 --prepared prepared/assets.json; then
               echo "released assets.json differs only by retired pre-0.3.1 entries; retaining released manifest"

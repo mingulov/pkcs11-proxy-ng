@@ -121,14 +121,29 @@ def manifests_match_ignoring_legacy(existing_path: Path,
         raise ReleaseError(f"cannot read asset listings: {exc}") from exc
     existing = _asset_map(existing_raw, existing_path)
     prepared = _asset_map(prepared_raw, prepared_path)
-    for name in LEGACY_MANIFEST_NAMES:
-        existing.pop(name, None)
-        prepared.pop(name, None)
-    require(existing == prepared,
-            "released assets.json differs from the prepared manifest "
-            "beyond retired pre-0.3.1 qualification entries; refusing "
-            "to replace")
-    return {"match": True, "compared": sorted(prepared)}
+    # Only existing-only legacy names are tolerated: prepared-only
+    # entries (legacy or not) mean the release lacks staged files,
+    # and shared names — legacy included — must pin identical bytes.
+    # Comparison is on (name, sha256) only: the `path` field is
+    # build-local metadata whose format varies across tag vintages.
+    prepared_only = sorted(set(prepared) - set(existing))
+    require(not prepared_only,
+            f"prepared manifest lists {prepared_only} missing from the "
+            "released assets.json; refusing to replace")
+    existing_only = sorted(set(existing) - set(prepared))
+    non_legacy = [name for name in existing_only
+                  if name not in LEGACY_MANIFEST_NAMES]
+    require(not non_legacy,
+            f"released assets.json lists {non_legacy} missing from the "
+            "prepared manifest; refusing to replace")
+    for name in sorted(set(existing) & set(prepared)):
+        require(existing[name] == prepared[name],
+                f"existing asset {name!r} diverges: released "
+                f"{existing[name]} differs from prepared "
+                f"{prepared[name]}; refusing to replace")
+    return {"match": True, "compared": sorted(prepared),
+            "tolerated_legacy": sorted(set(existing_only)
+                                       & set(LEGACY_MANIFEST_NAMES))}
 
 
 def compare_assets(existing_path: Path, prepared_path: Path) -> dict:

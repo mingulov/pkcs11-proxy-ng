@@ -1091,6 +1091,19 @@ class ReleasePublicationTests(unittest.TestCase):
         self.assertIn("scripts/release-upload.sh", text)
         self.assertIn("github.sha", text)
 
+    def test_manifest_check_comes_from_workflow_ref_not_tag(self):
+        # The manifest-compatibility check must run from the workflow-ref
+        # side checkout: a pre-0.3.1 tag's own scripts lack the
+        # `manifest-compatible` command, so invoking the tag checkout's
+        # copy would fail the retry with `invalid choice`.
+        workflow = load_workflow(RELEASE_YML)
+        text = job_text("publish", workflow)
+        self.assertIn("scripts/release_checks.py", text)
+        self.assertIn(
+            ".release-uploader/scripts/release_checks.py", text)
+        self.assertNotIn("python3 scripts/release_checks.py manifest",
+                         text)
+
     def test_divergent_assets_refuse_before_write(self):
         workflow = load_workflow(RELEASE_YML)
         text = job_text("publish", workflow)
@@ -1535,6 +1548,35 @@ class ManifestCompatibleTests(unittest.TestCase):
                                path="prepared/inventory.json")]
         prepared = [self.entry("a.tar.gz", path="prepared/a.tar.gz")]
         self.assertEqual(self.check(existing, prepared), 1)
+
+    def test_prepared_only_entry_refuses(self):
+        existing = [self.entry("a.tar.gz", path="prepared/a.tar.gz")]
+        prepared = [self.entry("a.tar.gz", path="prepared/a.tar.gz"),
+                    self.entry("inventory.json", digest="2" * 64,
+                               path="prepared/inventory.json")]
+        self.assertEqual(self.check(existing, prepared), 1)
+
+    def test_prepared_only_legacy_entry_refuses(self):
+        existing = [self.entry("a.tar.gz", path="prepared/a.tar.gz")]
+        prepared = [self.entry("a.tar.gz", path="prepared/a.tar.gz"),
+                    self.entry("qualification-record.json", digest="f" * 64,
+                               path="prepared/qualification-record.json")]
+        self.assertEqual(self.check(existing, prepared), 1)
+
+    def test_shared_legacy_digest_change_refuses(self):
+        existing = [self.entry("a.tar.gz", path="prepared/a.tar.gz"),
+                    self.entry("qualification-record.json", digest="f" * 64,
+                               path="prepared/qualification-record.json")]
+        prepared = [self.entry("a.tar.gz", path="prepared/a.tar.gz"),
+                    self.entry("qualification-record.json", digest="9" * 64,
+                               path="prepared/qualification-record.json")]
+        self.assertEqual(self.check(existing, prepared), 1)
+
+    def test_shared_legacy_same_digest_matches(self):
+        manifest = [self.entry("a.tar.gz", path="prepared/a.tar.gz"),
+                    self.entry("qualification-record.json", digest="f" * 64,
+                               path="prepared/qualification-record.json")]
+        self.assertEqual(self.check(manifest, manifest), 0)
 
 
 class TagEvidenceTests(unittest.TestCase):
