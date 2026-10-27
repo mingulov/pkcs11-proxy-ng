@@ -11,8 +11,9 @@ from release.package_archives import inspect_archives  # noqa: E402
 from release.package_binaries import build_binaries  # noqa: E402
 from release.package_bundles import stage_bundle  # noqa: E402
 from release.package_consumers import archive_consumer, registry_consumer  # noqa: E402
-from release.package_evidence import (candidate_name, compare_assets, select_evidence,  # noqa: E402
-                                      tag_evidence)
+from release.package_evidence import (candidate_name, compare_assets,  # noqa: E402
+                                      manifests_match_ignoring_legacy,
+                                      select_evidence, tag_evidence)
 from release.package_model import ReleaseError  # noqa: E402
 from release.package_notices import collect_workspace_inputs, generate_notices  # noqa: E402
 from release.package_receipt import write_receipt  # noqa: E402
@@ -93,6 +94,9 @@ def main(argv=None, *, repo=None) -> int:
     assets = commands.add_parser("assets-compare")
     assets.add_argument("--existing-json", required=True, type=Path)
     assets.add_argument("--prepared-json", required=True, type=Path)
+    manifest = commands.add_parser("manifest-compatible")
+    manifest.add_argument("--existing", required=True, type=Path)
+    manifest.add_argument("--prepared", required=True, type=Path)
     tagev = commands.add_parser("tag-evidence")
     tagev.add_argument("--tag", required=True)
     tagev.add_argument("--repo", required=True, type=Path)
@@ -133,6 +137,11 @@ def main(argv=None, *, repo=None) -> int:
         if args.command == "assets-compare":
             decision = compare_assets(args.existing_json, args.prepared_json)
             print(json.dumps({"assets_compare": decision}, sort_keys=True))
+            return 0
+        if args.command == "manifest-compatible":
+            result = manifests_match_ignoring_legacy(args.existing,
+                                                     args.prepared)
+            print(json.dumps({"manifest_compatible": result}, sort_keys=True))
             return 0
         if args.command == "tag-evidence":
             evidence = tag_evidence(args.repo, args.tag, args.expect_peeled)

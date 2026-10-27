@@ -1,10 +1,10 @@
 """Fail-closed candidate-evidence and release-asset identity checks.
 
 Stage C (Task 5b) helper behind the ``candidate-name``,
-``evidence-select``, ``assets-compare``, and ``tag-evidence``
-subcommands of ``scripts/release_checks.py``. Every function raises
-:class:`ReleaseError` on any mismatch; callers treat a nonzero exit
-as a hard refusal, never a fallback.
+``evidence-select``, ``assets-compare``, ``manifest-compatible``, and
+``tag-evidence`` subcommands of ``scripts/release_checks.py``. Every
+function raises :class:`ReleaseError` on any mismatch; callers treat
+a nonzero exit as a hard refusal, never a fallback.
 """
 
 from __future__ import annotations
@@ -99,6 +99,36 @@ def _asset_map(records, path: Path) -> dict:
         require(name not in assets, f"{path} lists {name!r} twice")
         assets[name] = digest
     return assets
+
+
+# Retired in 0.3.1: a retry of a pre-0.3.1 release keeps these on the
+# release untouched, and the manifest check tolerates their absence
+# from the prepared set. Anything else must match exactly.
+LEGACY_MANIFEST_NAMES = frozenset({
+    "qualification-binding.json",
+    "qualification-record.json",
+    "qualification-receipt.json",
+    "qualification-evidence.tar.gz",
+})
+
+
+def manifests_match_ignoring_legacy(existing_path: Path,
+                                    prepared_path: Path) -> dict:
+    try:
+        existing_raw = json.loads(Path(existing_path).read_text(encoding="utf-8"))
+        prepared_raw = json.loads(Path(prepared_path).read_text(encoding="utf-8"))
+    except (OSError, ValueError, UnicodeError) as exc:
+        raise ReleaseError(f"cannot read asset listings: {exc}") from exc
+    existing = _asset_map(existing_raw, existing_path)
+    prepared = _asset_map(prepared_raw, prepared_path)
+    for name in LEGACY_MANIFEST_NAMES:
+        existing.pop(name, None)
+        prepared.pop(name, None)
+    require(existing == prepared,
+            "released assets.json differs from the prepared manifest "
+            "beyond retired pre-0.3.1 qualification entries; refusing "
+            "to replace")
+    return {"match": True, "compared": sorted(prepared)}
 
 
 def compare_assets(existing_path: Path, prepared_path: Path) -> dict:

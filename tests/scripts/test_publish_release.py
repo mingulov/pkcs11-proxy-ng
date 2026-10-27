@@ -1095,8 +1095,12 @@ class ReleasePublicationTests(unittest.TestCase):
         workflow = load_workflow(RELEASE_YML)
         text = job_text("publish", workflow)
         self.assertIn("assets-compare", text)
+        self.assertIn("manifest-compatible", text)
         self.assertLess(
             text.index("assets-compare"),
+            text.index("run: .release-uploader/scripts/release-upload.sh"))
+        self.assertLess(
+            text.index("manifest-compatible"),
             text.index("run: .release-uploader/scripts/release-upload.sh"))
 
     def test_manifest_build_skips_itself(self):
@@ -1472,6 +1476,65 @@ class AssetCompareTests(unittest.TestCase):
     def test_duplicate_names_refuse(self):
         one = {"name": "a.tar.gz", "sha256": "1" * 64, "path": "dist/a.tar.gz"}
         self.assertEqual(self.compare([], [one, dict(one)]), 1)
+
+
+class ManifestCompatibleTests(unittest.TestCase):
+    # Retrying a pre-0.3.1 release must not wedge on its retired
+    # qualification assets: the released manifest may list them while
+    # the prepared manifest omits them. Any other difference refuses.
+    LEGACY = ("qualification-binding.json", "qualification-record.json",
+              "qualification-receipt.json",
+              "qualification-evidence.tar.gz")
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.workdir = Path(self.temp.name)
+
+    def check(self, existing, prepared):
+        existing_path = self.workdir / "existing.json"
+        prepared_path = self.workdir / "prepared.json"
+        existing_path.write_text(json.dumps(existing), encoding="utf-8")
+        prepared_path.write_text(json.dumps(prepared), encoding="utf-8")
+        return release_checks.main(
+            ["manifest-compatible", "--existing", str(existing_path),
+             "--prepared", str(prepared_path)], repo=ROOT)
+
+    def entry(self, name, digest="1" * 64, path=None):
+        record = {"name": name, "sha256": digest}
+        if path is not None:
+            record["path"] = path
+        return record
+
+    def test_identical_manifests_match(self):
+        manifest = [self.entry("a.tar.gz", path="prepared/a.tar.gz"),
+                    self.entry("inventory.json",
+                               digest="2" * 64, path="prepared/inventory.json")]
+        self.assertEqual(self.check(manifest, manifest), 0)
+
+    def test_legacy_only_difference_matches(self):
+        existing = ([self.entry(name, digest="f" * 64,
+                                path=f"prepared/{name}")
+                     for name in self.LEGACY]
+                    + [self.entry("a.tar.gz", path="prepared/a.tar.gz"),
+                       self.entry("inventory.json", digest="2" * 64,
+                                  path="prepared/inventory.json")])
+        prepared = [self.entry("a.tar.gz", path="prepared/a.tar.gz"),
+                    self.entry("inventory.json", digest="2" * 64,
+                               path="prepared/inventory.json")]
+        self.assertEqual(self.check(existing, prepared), 0)
+
+    def test_divergent_digest_refuses(self):
+        existing = [self.entry("a.tar.gz", digest="9" * 64)]
+        prepared = [self.entry("a.tar.gz", path="prepared/a.tar.gz")]
+        self.assertEqual(self.check(existing, prepared), 1)
+
+    def test_missing_non_legacy_entry_refuses(self):
+        existing = [self.entry("a.tar.gz", path="prepared/a.tar.gz"),
+                    self.entry("inventory.json", digest="2" * 64,
+                               path="prepared/inventory.json")]
+        prepared = [self.entry("a.tar.gz", path="prepared/a.tar.gz")]
+        self.assertEqual(self.check(existing, prepared), 1)
 
 
 class TagEvidenceTests(unittest.TestCase):

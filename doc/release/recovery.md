@@ -42,6 +42,9 @@ restarts publication.
    assets and refuses divergent bytes; the uploader rewrites identical
    bytes via `--clobber` and retries transient stalls (5 attempts,
    600 s per-attempt window). Re-dispatching is always safe.
+   Retrying a pre-0.3.1 release keeps its retired qualification
+   assets on the release untouched; the manifest check tolerates
+   those legacy-only entries instead of refusing.
 
 ## Failure playbook
 
