@@ -14,21 +14,24 @@
 # unexpired `crates-candidate-<tagCommit>-<runId>` artifact via read-only
 # `actions: read`. Missing/expired/ambiguous evidence refuses; expected
 # hashes are never reconstructed from already-published registry data.
-# `recover` then rechecks source/tag/receipt/qualification/candidate
-# binding (including exact annotated tag object plus peeled commit) before
+# `recover` then rechecks source/tag/receipt/candidate binding
+# (including exact annotated tag object plus peeled commit) before
 # `registry-recheck` re-verifies all eight published checksums and full
 # registry consumers.
 #
+# No approval gates and no provider-qualification evidence are required
+# (removed in 0.3.1 for development speed; restorable from history if a
+# gated flow is ever needed again, e.g. >=0.9).
+#
 # Binary jobs carry no registry token and no OIDC permission. `publish`
-# runs under the protected `release` environment and is the only job with
-# the write permission the GitHub Release needs (the reusable caller must
-# delegate that permission; every other job stays read-only).
+# is the only job with the write permission the GitHub Release needs
+# (the reusable caller must delegate that permission; every other job
+# stays read-only).
 # Assets publish through one combined path: existing same-named assets are
 # compared first — identical bytes are retained, missing assets are added,
 # divergent bytes refuse. Tags are never moved; assets are never silently
 # replaced or deleted; a retry where everything already matches uploads
-# nothing. Repository prerequisite: create the `release` environment with
-# required reviewers and tag deployment restrictions.
+# nothing.
 
 name: release
 
@@ -43,30 +46,6 @@ on:
         description: 'publish run holding the pre-auth candidate'
         required: true
         type: string
-      qualification-url:
-        description: 'HTTPS qualification record URL'
-        required: true
-        type: string
-      qualification-subject:
-        description: 'frozen-subject SHA'
-        required: true
-        type: string
-      qualification-run-id:
-        description: 'qualification evidence run id'
-        required: true
-        type: string
-      qualification-framework:
-        description: 'qualification framework commit SHA'
-        required: true
-        type: string
-      qualification-record-sha256:
-        description: 'provider-selection record digest'
-        required: true
-        type: string
-      qualification-receipt-sha256:
-        description: 'qualification receipt digest'
-        required: true
-        type: string
   workflow_dispatch:
     inputs:
       tag:
@@ -74,24 +53,6 @@ on:
         required: true
       candidate_run_id:
         description: 'publish run holding the pre-auth candidate'
-        required: true
-      qualification-url:
-        description: 'HTTPS qualification record URL'
-        required: true
-      qualification-subject:
-        description: 'frozen-subject SHA'
-        required: true
-      qualification-run-id:
-        description: 'qualification evidence run id'
-        required: true
-      qualification-framework:
-        description: 'qualification framework commit SHA'
-        required: true
-      qualification-record-sha256:
-        description: 'provider-selection record digest'
-        required: true
-      qualification-receipt-sha256:
-        description: 'qualification receipt digest'
         required: true
 
 permissions:
@@ -115,12 +76,6 @@ jobs:
     env:
       RECOVER_TAG: ${{ inputs.tag }}
       CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
-      QUALIFICATION_URL: ${{ inputs.qualification-url }}
-      QUALIFICATION_SUBJECT: ${{ inputs.qualification-subject }}
-      QUALIFICATION_RUN_ID: ${{ inputs.qualification-run-id }}
-      QUALIFICATION_FRAMEWORK: ${{ inputs.qualification-framework }}
-      QUALIFICATION_RECORD_SHA256: ${{ inputs.qualification-record-sha256 }}
-      QUALIFICATION_RECEIPT_SHA256: ${{ inputs.qualification-receipt-sha256 }}
       GH_TOKEN: ${{ github.token }}
     steps:
       - name: Checkout tag with full history
@@ -144,56 +99,7 @@ jobs:
       - name: Verify quality receipt
         run: scripts/verify-quality-receipt.sh "$RECOVER_TAG"
 
-      # Read-only authorization gate: the live release environment
-      # must carry required reviewers plus the documented ref policy
-      # before the publish job may upload release assets (see
-      # doc/release/environment-protection-contract.md). Fails closed
-      # on missing environment, missing reviewers,
-      # permissive/mismatched ref policy, or unavailable API.
-      - name: Verify release environment protections
-        run: |
-          set -euo pipefail
-          gh api "repos/${GITHUB_REPOSITORY}/environments" \
-            > "$RUNNER_TEMP/release-env-list.json"
-          gh api "repos/${GITHUB_REPOSITORY}/environments/release/deployment-branch-policies" \
-            > "$RUNNER_TEMP/release-env-policies.json"
-          python3 scripts/release_checks.py environments-preflight \
-            --api-json "$RUNNER_TEMP/release-env-list.json" \
-            --environment release \
-            --policies-json "release=$RUNNER_TEMP/release-env-policies.json"
-
-      # Qualification gate: re-verify the frozen subject's provider
-      # evidence from the immutable qualification artifact before any
-      # binary job starts (see
-      # doc/release/qualification-binding-contract.md). Composes with
-      # the environments-preflight step above: authorization and
-      # evidence are separate gates; both refuse before the asset
-      # upload. Expected tree/lock come from the frozen subject
-      # (HEAD~1, the pre-receipt parent), never from the evidence
-      # being validated. The validated record, receipt, and complete
-      # evidence bundle are staged for durable retention as release
-      # assets.
-      - name: Reverify provider qualification evidence
-        run: |
-          set -euo pipefail
-          gh run download "$QUALIFICATION_RUN_ID" \
-            -n provider-qualification \
-            -D "$RUNNER_TEMP/qual-evidence" \
-            -R "$GITHUB_REPOSITORY"
-          EXPECT_TREE="$(git rev-parse 'HEAD~1^{tree}')"
-          EXPECT_LOCK="$(git show 'HEAD~1:Cargo.lock' | sha256sum | cut -d' ' -f1)"
-          python3 scripts/release_checks.py qualification-preflight \
-            --evidence-dir "$RUNNER_TEMP/qual-evidence" \
-            --expect-commit "$QUALIFICATION_SUBJECT" \
-            --expect-tree "$EXPECT_TREE" \
-            --expect-lock-sha256 "$EXPECT_LOCK" \
-            --expect-framework "$QUALIFICATION_FRAMEWORK" \
-            --expect-run-id "$QUALIFICATION_RUN_ID" \
-            --expect-url "$QUALIFICATION_URL" \
-            --expect-record-sha256 "$QUALIFICATION_RECORD_SHA256" \
-            --expect-receipt-sha256 "$QUALIFICATION_RECEIPT_SHA256"
-
-      - name: Reinspect tag, source, and qualification binding
+      - name: Reinspect tag and source
         id: recheck
         run: |
           set -euo pipefail
@@ -201,9 +107,7 @@ jobs:
           python3 scripts/release_checks.py tag-evidence --tag "$TAG" --repo .
           PEELED="$(git rev-parse "${TAG}^{}")"
           python3 scripts/release_checks.py preflight --ref "refs/tags/${TAG}" \
-            --require-main --mode dry-run --package workspace \
-            --qualification-url "$QUALIFICATION_URL" \
-            --qualification-subject "$QUALIFICATION_SUBJECT"
+            --require-main --mode dry-run --package workspace
           {
             echo "tag=${TAG}"
             echo "tag_commit=${PEELED}"
@@ -250,46 +154,6 @@ jobs:
           run-id: ${{ inputs.candidate_run_id }}
           github-token: ${{ github.token }}
           path: recovered/
-
-      - name: Verify recovered qualification binding
-        env:
-          TAG_COMMIT: ${{ steps.recheck.outputs.tag_commit }}
-        run: |
-          set -euo pipefail
-          python3 scripts/release_checks.py evidence-verify \
-            --binding recovered/qualification-binding.json \
-            --expect-url "$QUALIFICATION_URL" \
-            --expect-subject "$QUALIFICATION_SUBJECT" \
-            --expect-tag-commit "$TAG_COMMIT" \
-            --expect-run-id "$CANDIDATE_RUN_ID" \
-            --expect-receipt-sha256 "$QUALIFICATION_RECEIPT_SHA256" \
-            --expect-record-sha256 "$QUALIFICATION_RECORD_SHA256" \
-            --expect-qual-run-id "$QUALIFICATION_RUN_ID" \
-            --expect-framework "$QUALIFICATION_FRAMEWORK"
-
-      - name: Stage validated qualification record for retention
-        run: |
-          set -euo pipefail
-          # The gate above verified these exact bytes against the
-          # pinned digests; copy (never re-download) them into the
-          # recovered evidence so the publish job retains them as
-          # durable release assets alongside provenance. The archive
-          # preserves the receipt/bundle relative layout so the
-          # portable validator can revalidate after run expiry.
-          cp "$RUNNER_TEMP/qual-evidence/bundle/pool-evidence.json" \
-            recovered/qualification-record.json
-          cp "$RUNNER_TEMP/qual-evidence/receipt.json" \
-            recovered/qualification-receipt.json
-          # Canonical archive: recovery regenerates this tarball on
-          # every retry and the publish compare gate refuses divergent
-          # bytes, so extraction metadata must not leak into the
-          # digest — sorted members, fixed mtime/ownership, and
-          # deterministic gzip keep identical validated evidence
-          # byte-identical across retries.
-          tar --sort=name --owner=0 --group=0 --numeric-owner \
-            --mtime='1970-01-01' -cf - \
-            -C "$RUNNER_TEMP/qual-evidence" receipt.json bundle \
-            | gzip -n > recovered/qualification-evidence.tar.gz
 
       - name: Stage recovered evidence for downstream jobs
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -846,7 +710,6 @@ jobs:
     runs-on: ubuntu-26.04
     timeout-minutes: 30
     needs: [recover, binary-linux, binary-windows, binary-macos, smoke-linux, smoke-windows, smoke-macos]
-    environment: release
     permissions:
       contents: write
       id-token: write
@@ -947,14 +810,7 @@ jobs:
                                  "sha256": hashlib.sha256(path.read_bytes()).hexdigest()})
           print(json.dumps(assets))
           EOF
-          cp evidence/inventory.json evidence/qualification-binding.json prepared/
-          # Durable retention: the validated qualification record,
-          # receipt, and complete evidence bundle ship as release
-          # assets alongside provenance, not just 90-day run
-          # artifacts. The bundle archive preserves the relative
-          # layout; the assets manifest below pins its digest.
-          cp evidence/qualification-record.json evidence/qualification-receipt.json prepared/
-          cp evidence/qualification-evidence.tar.gz prepared/
+          cp evidence/inventory.json prepared/
           python3 - <<'EOF' > prepared/assets.json
           import hashlib, json
           from pathlib import Path
@@ -996,7 +852,7 @@ jobs:
           echo "add_count=${ADD_COUNT}" >> "$GITHUB_OUTPUT"
 
       # Release-binding predicate: the bundles attest to the tag,
-      # tag commit, and qualification that produced them — NOT to
+      # tag commit, and candidate run that produced them — NOT to
       # "built by this workflow run" (binaries come from registry
       # archives in the binary jobs, and this workflow may run from
       # main, so stock build provenance would mislead). Subjects are
@@ -1005,6 +861,9 @@ jobs:
       # bundle on the release needs an attestation.
       - name: Write release-binding predicate
         id: predicate
+        env:
+          TAG_COMMIT: ${{ needs.recover.outputs.tag_commit }}
+          CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
         run: |
           set -euo pipefail
           python3 - <<'EOF'
@@ -1018,23 +877,11 @@ jobs:
                            for path in glob.glob(pattern))
           if not bundles:
               raise SystemExit("::error::no prepared bundles to attest")
-          binding = json.loads(
-              Path("evidence/qualification-binding.json").read_text())
           predicate = {
               "tag": os.environ["RELEASE_TAG"],
               "repository": "${{ github.repository }}",
-              "tag_commit": binding["tag_commit"],
-              "candidate_run_id": binding["run_id"],
-              "qualification": {
-                  "url": binding["qualification_url"],
-                  "subject": binding["qualification_subject"],
-                  "record_sha256":
-                      binding["qualification_record_sha256"],
-                  "receipt_sha256":
-                      binding["qualification_receipt_sha256"],
-                  "run_id": binding["qualification_run_id"],
-                  "framework": binding["qualification_framework"],
-              },
+              "tag_commit": os.environ["TAG_COMMIT"],
+              "candidate_run_id": os.environ["CANDIDATE_RUN_ID"],
               "built_from": "registry",
           }
           Path("attest").mkdir(exist_ok=True)

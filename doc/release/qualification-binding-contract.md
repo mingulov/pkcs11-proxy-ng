@@ -1,5 +1,11 @@
 # Qualification binding contract
 
+> **RETIRED in 0.3.1.** Provider-qualification evidence and the
+> approvals bound to it were removed from the release path for
+> development speed (restorable from history if a gated flow is ever
+> needed again, e.g. >=0.9). This document is kept for historical
+> reference only; the workflows no longer implement it.
+
 The release qualification binding proves that the frozen release
 subject completed provider acceptance — not just code-quality gates —
 before any publication credential is used or any external mutation

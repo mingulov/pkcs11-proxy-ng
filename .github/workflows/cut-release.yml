@@ -2,14 +2,16 @@
 #
 # One dispatch carries the whole pre-publication path from the Actions
 # tab: this workflow verifies the eight receipt gates plus
-# subject/version/CHANGELOG/tag preconditions on main, cuts an
-# approval-gated receipt-only commit with an annotated tag, waits for
-# green CI on the new tag, then dispatches publish.yml with the inputs
-# passed through once. Upload and release approvals still gate their
-# own environments inside publish/release; nothing here bypasses them.
+# subject/version/CHANGELOG/tag preconditions on main, cuts a
+# receipt-only commit with an annotated tag (no approval gates: the
+# dispatcher is the sole operator), waits for green CI on the new
+# tag, then dispatches publish.yml with the inputs passed through
+# once.
 #
-# Prerequisites (maintainer, one-time): create the `release-tag`
-# environment with required reviewers. The cut job pushes with
+# Flow notes: no environment approvals and no provider-qualification
+# evidence are required (removed in 0.3.1 for development speed; the
+# strict machinery can be restored from history if a gated flow is
+# ever needed again, e.g. >=0.9). The cut job pushes with
 # GITHUB_TOKEN, which works while main is unprotected; protecting
 # main later requires an App token with bypass for that job instead
 # (see the publication guide).
@@ -41,24 +43,6 @@ on:
         description: 'workspace or exactly one of the eight crate names'
         required: false
         default: workspace
-      qualification-url:
-        description: 'HTTPS qualification record URL (upload modes)'
-        required: false
-      qualification-subject:
-        description: 'frozen-subject SHA (upload modes)'
-        required: false
-      qualification-run-id:
-        description: 'qualification evidence run id (upload modes)'
-        required: false
-      qualification-framework:
-        description: 'qualification framework commit SHA (upload modes)'
-        required: false
-      qualification-record-sha256:
-        description: 'provider-selection record digest (upload modes)'
-        required: false
-      qualification-receipt-sha256:
-        description: 'qualification receipt digest (upload modes)'
-        required: false
 
 permissions:
   contents: read
@@ -106,32 +90,6 @@ jobs:
             echo "::error::version '$VERSION' is not MAJOR.MINOR.PATCH; refusing."
             exit 1
           fi
-          if [[ "${{ inputs.mode }}" != "dry-run" ]]; then
-            if [[ -z "${{ inputs.qualification-url }}" || -z "${{ inputs.qualification-subject }}" || -z "${{ inputs.qualification-run-id }}" || -z "${{ inputs.qualification-framework }}" || -z "${{ inputs.qualification-record-sha256 }}" || -z "${{ inputs.qualification-receipt-sha256 }}" ]]; then
-              echo "::error::upload modes require the full qualification identity: url, subject, run-id, framework, record-sha256, receipt-sha256."
-              exit 1
-            fi
-            if [[ ! "${{ inputs.qualification-subject }}" =~ ^[0-9a-f]{40}$ ]]; then
-              echo "::error::qualification-subject is not a 40-hex SHA."
-              exit 1
-            fi
-            if [[ ! "${{ inputs.qualification-run-id }}" =~ ^[1-9][0-9]*$ ]]; then
-              echo "::error::qualification-run-id is not a positive integer."
-              exit 1
-            fi
-            if [[ ! "${{ inputs.qualification-framework }}" =~ ^[0-9a-f]{40}$ ]]; then
-              echo "::error::qualification-framework is not a 40-hex SHA."
-              exit 1
-            fi
-            if [[ ! "${{ inputs.qualification-record-sha256 }}" =~ ^[0-9a-f]{64}$ ]]; then
-              echo "::error::qualification-record-sha256 is not a 64-hex digest."
-              exit 1
-            fi
-            if [[ ! "${{ inputs.qualification-receipt-sha256 }}" =~ ^[0-9a-f]{64}$ ]]; then
-              echo "::error::qualification-receipt-sha256 is not a 64-hex digest."
-              exit 1
-            fi
-          fi
           TAG="v$VERSION"
           if git ls-remote --tags origin "refs/tags/$TAG" | grep -q .; then
             echo "::error::tag $TAG already exists; tags are never moved."
@@ -139,10 +97,6 @@ jobs:
           fi
           echo "verified_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-          if [[ "${{ inputs.mode }}" != "dry-run" && "${{ inputs.qualification-subject }}" != "$(git rev-parse HEAD)" ]]; then
-            echo "::error::qualification-subject is not the verified HEAD; evidence must qualify this subject."
-            exit 1
-          fi
 
       - name: Isolate Cargo directories
         run: |
@@ -247,72 +201,11 @@ jobs:
           overwrite: false
           if-no-files-found: error
 
-      # Read-only authorization gate: the live release-tag
-      # environment must carry required reviewers plus the
-      # documented ref policy before the cut job may push any tag
-      # (see doc/release/environment-protection-contract.md). Fails
-      # closed on missing environment, missing reviewers,
-      # permissive/mismatched ref policy, or unavailable API.
-      - name: Verify release-tag environment protections
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-          gh api "repos/${{ github.repository }}/environments" \
-            > "$RUNNER_TEMP/release-tag-env-list.json"
-          gh api "repos/${{ github.repository }}/environments/release-tag/deployment-branch-policies" \
-            > "$RUNNER_TEMP/release-tag-env-policies.json"
-          python3 scripts/release_checks.py environments-preflight \
-            --api-json "$RUNNER_TEMP/release-tag-env-list.json" \
-            --environment release-tag \
-            --policies-json "release-tag=$RUNNER_TEMP/release-tag-env-policies.json"
-
-      # Qualification gate: the candidate's provider evidence must be
-      # immutable, complete, and bound to the verified subject before
-      # the approval-gated cut job may push any tag (see
-      # doc/release/qualification-binding-contract.md). Composes with
-      # the environments-preflight step above: authorization and
-      # evidence are separate gates; both refuse before mutation.
-      # Dispatches without a qualification run skip this gate; upload
-      # modes were already required to supply the full identity above.
-      - name: Verify provider qualification evidence
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          QUALIFICATION_URL: ${{ inputs.qualification-url }}
-          QUALIFICATION_SUBJECT: ${{ inputs.qualification-subject }}
-          QUALIFICATION_RUN_ID: ${{ inputs.qualification-run-id }}
-          QUALIFICATION_FRAMEWORK: ${{ inputs.qualification-framework }}
-          QUALIFICATION_RECORD_SHA256: ${{ inputs.qualification-record-sha256 }}
-          QUALIFICATION_RECEIPT_SHA256: ${{ inputs.qualification-receipt-sha256 }}
-        run: |
-          set -euo pipefail
-          if [[ -z "${QUALIFICATION_RUN_ID:-}" ]]; then
-            echo "no qualification run supplied; skipping provider-qualification gate."
-            exit 0
-          fi
-          gh run download "$QUALIFICATION_RUN_ID" \
-            -n provider-qualification \
-            -D "$RUNNER_TEMP/qual-evidence" \
-            -R "${{ github.repository }}"
-          EXPECT_TREE="$(git rev-parse 'HEAD^{tree}')"
-          EXPECT_LOCK="$(git show HEAD:Cargo.lock | sha256sum | cut -d' ' -f1)"
-          python3 scripts/release_checks.py qualification-preflight \
-            --evidence-dir "$RUNNER_TEMP/qual-evidence" \
-            --expect-commit "$QUALIFICATION_SUBJECT" \
-            --expect-tree "$EXPECT_TREE" \
-            --expect-lock-sha256 "$EXPECT_LOCK" \
-            --expect-framework "$QUALIFICATION_FRAMEWORK" \
-            --expect-run-id "$QUALIFICATION_RUN_ID" \
-            --expect-url "$QUALIFICATION_URL" \
-            --expect-record-sha256 "$QUALIFICATION_RECORD_SHA256" \
-            --expect-receipt-sha256 "$QUALIFICATION_RECEIPT_SHA256"
-
   cut:
-    name: Cut receipt commit and tag (approval-gated)
+    name: Cut receipt commit and tag
     runs-on: ubuntu-26.04
     timeout-minutes: 15
     needs: [verify]
-    environment: release-tag
     permissions:
       contents: write
       actions: write
@@ -327,7 +220,7 @@ jobs:
       - name: Re-verify subject and tag absence
         run: |
           set -euo pipefail
-          # Main may have moved during the approval wait; the receipt binds
+          # Main may have moved since verify; the receipt binds
           # the verified SHA, so any drift refuses here.
           HEAD="$(git rev-parse HEAD)"
           if [[ "$HEAD" != "${{ needs.verify.outputs.verified_sha }}" ]]; then
@@ -438,10 +331,4 @@ jobs:
             -R "${{ github.repository }}" \
             -f mode="${{ inputs.mode }}" \
             -f package="${{ inputs.package }}" \
-            -f tag="${{ needs.cut.outputs.tag }}" \
-            -f qualification-url="${{ inputs.qualification-url }}" \
-            -f qualification-subject="${{ inputs.qualification-subject }}" \
-            -f qualification-run-id="${{ inputs.qualification-run-id }}" \
-            -f qualification-framework="${{ inputs.qualification-framework }}" \
-            -f qualification-record-sha256="${{ inputs.qualification-record-sha256 }}" \
-            -f qualification-receipt-sha256="${{ inputs.qualification-receipt-sha256 }}"
+            -f tag="${{ needs.cut.outputs.tag }}"

@@ -195,9 +195,8 @@ PKCS#11 module — take it from a GitHub release bundle or OS package,
 never `cargo install` it as a library.
 
 The current checkout is not release-qualified. The full
-maintainer procedure — prerequisites, protected environments, staging,
-qualification approval, recovery, evidence retention, and docs.rs
-follow-up — is in the
+maintainer procedure — prerequisites, staging, recovery, evidence
+retention, and docs.rs follow-up — is in the
 [crates.io publication guide](./doc/release/crates-io-publishing.md).
 
 ## Contributor rules

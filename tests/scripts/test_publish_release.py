@@ -97,6 +97,16 @@ class PublishTriggerTests(unittest.TestCase):
         inputs = workflow_triggers(workflow)["workflow_dispatch"].get("inputs", {})
         self.assertEqual(inputs["package"]["default"], "workspace")
 
+    def test_no_qualification_inputs(self):
+        workflow = load_workflow(PUBLISH_YML)
+        inputs = workflow_triggers(workflow)["workflow_dispatch"].get("inputs", {})
+        for name in ("qualification-url", "qualification-subject",
+                     "qualification-run-id", "qualification-framework",
+                     "qualification-record-sha256",
+                     "qualification-receipt-sha256"):
+            with self.subTest(name=name):
+                self.assertNotIn(name, inputs)
+
     def test_tag_push_validates_only(self):
         """A tag push runs validation, never the upload job."""
         workflow = load_workflow(PUBLISH_YML)
@@ -136,10 +146,10 @@ class PublishJobBoundaryTests(unittest.TestCase):
         permissions = job.get("permissions", {})
         self.assertEqual(permissions.get("checks"), "read")
 
-    def test_protected_upload_gating(self):
+    def test_upload_has_no_environment_gate(self):
         workflow = load_workflow(PUBLISH_YML)
         upload = workflow["jobs"]["upload"]
-        self.assertEqual(upload.get("environment"), "crates-io")
+        self.assertIsNone(upload.get("environment"))
         self.assertIn("needs", upload)
         for needed in ("preflight", "candidate"):
             self.assertIn(needed, upload["needs"])
@@ -229,13 +239,15 @@ class PublishEvidenceTests(unittest.TestCase):
         self.assertIn("overwrite: false", text)
         self.assertIn("retention-days: 90", text)
 
-    def test_pre_auth_artifact_carries_all_eight_plus_binding(self):
+    def test_pre_auth_artifact_carries_archives_inventory_checksums(self):
         workflow = load_workflow(PUBLISH_YML)
         text = job_text("candidate", workflow)
         self.assertIn("SHA256SUMS", text)
         self.assertIn("inventory", text)
-        self.assertIn("qualification", text)
         self.assertIn("source_commit", text)
+        self.assertNotIn("qualification-binding", text)
+        self.assertNotIn("evidence-bind", text)
+        self.assertNotIn("qualification", text)
 
     def test_trusted_auth_uses_pinned_official_action(self):
         workflow = load_workflow(PUBLISH_YML)
@@ -313,21 +325,17 @@ class PublishEvidenceTests(unittest.TestCase):
         env = dispatch[0].get("env", {})
         self.assertIn("needs.preflight.outputs.tag", str(env.get("REC_TAG", "")))
         self.assertIn("github.run_id", str(env.get("REC_RUN_ID", "")))
-        self.assertIn("needs.preflight.outputs.qual_url",
-                      str(env.get("REC_QUAL_URL", "")))
-        self.assertIn("needs.preflight.outputs.qual_subject",
-                      str(env.get("REC_QUAL_SUBJECT", "")))
         self.assertIn("github.repository", str(env.get("REC_REPO", "")))
         run = dispatch[0].get("run", "")
         self.assertIn("gh workflow run release.yml", run)
         self.assertNotIn("${{", run)
+        self.assertNotIn("QUAL_", str(env))
         for snippet in ('--ref "$REC_TAG"', '-R "$REC_REPO"',
                         '-f tag="$REC_TAG"',
-                        '-f candidate_run_id="$REC_RUN_ID"',
-                        '-f qualification-url="$REC_QUAL_URL"',
-                        '-f qualification-subject="$REC_QUAL_SUBJECT"'):
+                        '-f candidate_run_id="$REC_RUN_ID"'):
             with self.subTest(snippet=snippet):
                 self.assertIn(snippet, run)
+        self.assertNotIn("qualification-", run)
         permissions = job.get("permissions", {})
         self.assertEqual(permissions.get("actions"), "write")
         self.assertNotEqual(permissions.get("id-token"), "write")
@@ -355,28 +363,14 @@ class PublishEvidenceTests(unittest.TestCase):
         env = records[0].get("env", {})
         self.assertIn("needs.preflight.outputs.tag", str(env.get("REC_TAG", "")))
         self.assertIn("github.run_id", str(env.get("REC_RUN_ID", "")))
-        self.assertIn("needs.preflight.outputs.qual_url",
-                      str(env.get("REC_QUAL_URL", "")))
-        self.assertIn("needs.preflight.outputs.qual_subject",
-                      str(env.get("REC_QUAL_SUBJECT", "")))
-        self.assertIn("needs.preflight.outputs.qual_run_id",
-                      str(env.get("REC_QUAL_RUN_ID", "")))
-        self.assertIn("needs.preflight.outputs.qual_framework",
-                      str(env.get("REC_QUAL_FRAMEWORK", "")))
-        self.assertIn("needs.preflight.outputs.qual_record_sha256",
-                      str(env.get("REC_QUAL_RECORD_SHA256", "")))
-        self.assertIn("needs.preflight.outputs.qual_receipt_sha256",
-                      str(env.get("REC_QUAL_RECEIPT_SHA256", "")))
         self.assertIn("github.repository", str(env.get("REC_REPO", "")))
         script = records[0].get("run", "")
         self.assertNotIn("${{", script)
+        self.assertNotIn("QUAL_", script)
         self.assertIn("gh workflow run release.yml", script)
         self.assertIn("--ref main", script)
         self.assertIn("sq()", script)
-        for var in ("REC_TAG", "REC_RUN_ID", "REC_QUAL_URL",
-                    "REC_QUAL_SUBJECT", "REC_QUAL_RUN_ID",
-                    "REC_QUAL_FRAMEWORK", "REC_QUAL_RECORD_SHA256",
-                    "REC_QUAL_RECEIPT_SHA256", "REC_REPO"):
+        for var in ("REC_TAG", "REC_RUN_ID", "REC_REPO"):
             with self.subTest(var=var):
                 self.assertIn(f'"$(sq "${var}")"', script)
         uploads = [step for step in steps
@@ -432,16 +426,10 @@ class PublishEvidenceTests(unittest.TestCase):
         # metacharacter class that double-quoted interpolation
         # would execute or mangle.
         return {
-            "REC_TAG": "v9.9.9",
+            "REC_TAG": ("v9.9.9$(touch "
+                        f"{tmp_name})&`id`'q"),
             "REC_REPO": "owner/repo",
-            "REC_RUN_ID": "123",
-            "REC_QUAL_URL": ("https://example.invalid/q?a=1&b=$HOME&c=$(touch "
-                             f"{tmp_name})&d='q'&e=`id`&f=a b"),
-            "REC_QUAL_SUBJECT": "ab12'cd$(id)",
-            "REC_QUAL_RUN_ID": "456&touch",
-            "REC_QUAL_FRAMEWORK": "ef01`id`",
-            "REC_QUAL_RECORD_SHA256": "aa bb$(id)",
-            "REC_QUAL_RECEIPT_SHA256": "cc'dd",
+            "REC_RUN_ID": "123&touch $(id)",
         }
 
     @unittest.skipUnless(shutil.which("bash"), "bash is required to replay the record step")
@@ -485,13 +473,7 @@ class PublishEvidenceTests(unittest.TestCase):
         self.assertEqual((tmp / "gh-args.log").read_text(encoding="utf-8").splitlines(),
                          ["workflow", "run", "release.yml", "--ref", "main",
                           "-R", values["REC_REPO"], "-f", f"tag={values['REC_TAG']}",
-                          "-f", f"candidate_run_id={values['REC_RUN_ID']}",
-                          "-f", f"qualification-url={values['REC_QUAL_URL']}",
-                          "-f", f"qualification-subject={values['REC_QUAL_SUBJECT']}",
-                          "-f", f"qualification-run-id={values['REC_QUAL_RUN_ID']}",
-                          "-f", f"qualification-framework={values['REC_QUAL_FRAMEWORK']}",
-                          "-f", f"qualification-record-sha256={values['REC_QUAL_RECORD_SHA256']}",
-                          "-f", f"qualification-receipt-sha256={values['REC_QUAL_RECEIPT_SHA256']}"])
+                          "-f", f"candidate_run_id={values['REC_RUN_ID']}"])
         self.assertFalse((tmp / "pwned").exists(),
                          "command substitution in a value must not execute")
 
@@ -515,13 +497,7 @@ class PublishEvidenceTests(unittest.TestCase):
         self.assertEqual(argv,
                          ["workflow", "run", "release.yml", "--ref", values["REC_TAG"],
                           "-R", values["REC_REPO"], "-f", f"tag={values['REC_TAG']}",
-                          "-f", f"candidate_run_id={values['REC_RUN_ID']}",
-                          "-f", f"qualification-url={values['REC_QUAL_URL']}",
-                          "-f", f"qualification-subject={values['REC_QUAL_SUBJECT']}",
-                          "-f", f"qualification-run-id={values['REC_QUAL_RUN_ID']}",
-                          "-f", f"qualification-framework={values['REC_QUAL_FRAMEWORK']}",
-                          "-f", f"qualification-record-sha256={values['REC_QUAL_RECORD_SHA256']}",
-                          "-f", f"qualification-receipt-sha256={values['REC_QUAL_RECEIPT_SHA256']}"])
+                          "-f", f"candidate_run_id={values['REC_RUN_ID']}"])
         self.assertFalse((tmp / "pwned").exists(),
                          "command substitution in a value must not execute")
 
@@ -676,10 +652,9 @@ class ReleaseTriggerTests(unittest.TestCase):
         self.assertIn("workflow_call", triggers)
         self.assertIn("workflow_dispatch", triggers)
         inputs = triggers["workflow_dispatch"].get("inputs", {})
-        for name in ("tag", "candidate_run_id", "qualification-url",
-                     "qualification-subject"):
-            with self.subTest(input=name):
-                self.assertIn(name, inputs)
+        self.assertEqual(set(inputs), {"tag", "candidate_run_id"})
+        call_inputs = triggers["workflow_call"].get("inputs", {})
+        self.assertEqual(set(call_inputs), {"tag", "candidate_run_id"})
 
     def test_no_tag_push_workspace_builds(self):
         workflow = load_workflow(RELEASE_YML)
@@ -718,8 +693,8 @@ class ReleaseRecoveryTests(unittest.TestCase):
         # refuses every main-dispatched run (36424073373), but
         # pre-fix tag scripts require the flag — so the workflow
         # passes the run's own head (tautology for old scripts,
-        # ignored by new ones). Tag binding comes from the artifact
-        # name plus evidence-verify instead.
+        # ignored by new ones). Tag binding comes from the
+        # exact-name candidate artifact selection instead.
         workflow = load_workflow(RELEASE_YML)
         runs = "\n".join(run_blocks(workflow["jobs"]["recover"]))
         self.assertIn("--head-sha", runs)
@@ -750,9 +725,10 @@ class ReleaseRecoveryTests(unittest.TestCase):
         workflow = load_workflow(RELEASE_YML)
         text = job_text("recover", workflow)
         for needle in ("verify-release-subject.sh", "verify-quality-receipt.sh",
-                       "preflight", "evidence-verify", "tag-evidence"):
+                       "preflight", "tag-evidence", "evidence-select"):
             with self.subTest(needle=needle):
                 self.assertIn(needle, text)
+        self.assertNotIn("qualification", text)
 
     def test_registry_rechecked_before_binaries(self):
         workflow = load_workflow(RELEASE_YML)
@@ -819,7 +795,7 @@ class ReleaseRecoveryTests(unittest.TestCase):
         doc = (ROOT / "doc" / "release" / "recovery.md").read_text(
             encoding="utf-8")
         self.assertIn("release-evidence-", doc)
-        self.assertIn("qualification-binding.json", doc)
+        self.assertNotIn("qualification-binding.json", doc)
         self.assertNotIn("dispatch record", doc)
 
     def test_publishing_guide_links_release_recovery_runbook(self):
@@ -932,9 +908,10 @@ class ReleaseRecoveryTests(unittest.TestCase):
         # The publish job attests the explicit prepared bundles —
         # including identical retained ones, which stage/ omits on
         # retries — after the compare gate and before the upload.
-        # The predicate binds tag, tag commit, and qualification;
-        # stock build provenance would mislead (binaries come from
-        # registry archives, and this workflow may run from main).
+        # The predicate binds tag, tag commit, and the candidate
+        # run; stock build provenance would mislead (binaries come
+        # from registry archives, and this workflow may run from
+        # main).
         workflow = load_workflow(RELEASE_YML)
         job = workflow["jobs"]["publish"]
         steps = [step for step in job.get("steps", [])
@@ -948,7 +925,9 @@ class ReleaseRecoveryTests(unittest.TestCase):
         # still acquire its attestations on a zero-add re-run.
         self.assertNotIn("if", predicate)
         block = predicate.get("run", "")
-        self.assertIn("evidence/qualification-binding.json", block)
+        self.assertNotIn("qualification", block)
+        self.assertIn("TAG_COMMIT", block)
+        self.assertIn("CANDIDATE_RUN_ID", block)
         self.assertIn("prepared/*.tar.gz", block)
         self.assertIn("prepared/*.zip", block)
         self.assertIn("attest/release-binding.json", block)
@@ -983,16 +962,21 @@ class ReleaseRecoveryTests(unittest.TestCase):
 
     @unittest.skipUnless(shutil.which("bash"), "bash is required to replay the predicate step")
     def test_predicate_step_emits_binding_and_subjects(self):
-        # Replay the predicate step against fixture bundles and a
-        # fixture qualification binding: the emitted predicate must
-        # bind tag, tag commit, and qualification, and the subjects
-        # output must list every prepared bundle.
+        # Replay the predicate step against fixture bundles: the
+        # emitted predicate must bind tag, tag commit, and the
+        # candidate run, and the subjects output must list every
+        # prepared bundle.
         workflow = load_workflow(RELEASE_YML)
         job = workflow["jobs"]["publish"]
         predicates = [step for step in job.get("steps", [])
                       if isinstance(step, dict)
                       and step.get("id") == "predicate"]
         self.assertEqual(len(predicates), 1)
+        step_env = predicates[0].get("env", {})
+        self.assertIn("needs.recover.outputs.tag_commit",
+                      str(step_env.get("TAG_COMMIT", "")))
+        self.assertIn("inputs.candidate_run_id",
+                      str(step_env.get("CANDIDATE_RUN_ID", "")))
         block = predicates[0]["run"]
         self.assertIn("${{ github.repository }}", block)
         block = block.replace("${{ github.repository }}", "owner/repo")
@@ -1001,20 +985,12 @@ class ReleaseRecoveryTests(unittest.TestCase):
         (tmp / "prepared").mkdir()
         (tmp / "prepared" / "b.zip").write_text("zip", encoding="utf-8")
         (tmp / "prepared" / "a.tar.gz").write_text("tar", encoding="utf-8")
-        (tmp / "evidence").mkdir()
-        (tmp / "evidence" / "qualification-binding.json").write_text(
-            json.dumps({"tag_commit": "c" * 40, "run_id": "123",
-                        "qualification_url": "https://example.invalid/q",
-                        "qualification_subject": "s" * 40,
-                        "qualification_record_sha256": "1" * 64,
-                        "qualification_receipt_sha256": "2" * 64,
-                        "qualification_run_id": "456",
-                        "qualification_framework": "f" * 40}),
-            encoding="utf-8")
         script = tmp / "predicate.sh"
         script.write_text(block, encoding="utf-8")
         env = dict(os.environ)
         env.update({"RELEASE_TAG": "v9.9.9",
+                    "TAG_COMMIT": "c" * 40,
+                    "CANDIDATE_RUN_ID": "123",
                     "GITHUB_OUTPUT": str(tmp / "outputs.txt")})
         proc = subprocess.run(["bash", str(script)], cwd=tmp, env=env,
                               text=True, capture_output=True, timeout=60)
@@ -1026,12 +1002,6 @@ class ReleaseRecoveryTests(unittest.TestCase):
             "repository": "owner/repo",
             "tag_commit": "c" * 40,
             "candidate_run_id": "123",
-            "qualification": {"url": "https://example.invalid/q",
-                             "subject": "s" * 40,
-                             "record_sha256": "1" * 64,
-                             "receipt_sha256": "2" * 64,
-                             "run_id": "456",
-                             "framework": "f" * 40},
             "built_from": "registry",
         })
         outputs = (tmp / "outputs.txt").read_text(encoding="utf-8")
@@ -1051,16 +1021,12 @@ class ReleaseRecoveryTests(unittest.TestCase):
         tmp = Path(tempfile.mkdtemp(prefix="predicate-empty-test-"))
         self.addCleanup(shutil.rmtree, tmp, True)
         (tmp / "prepared").mkdir()
-        (tmp / "evidence").mkdir()
-        (tmp / "evidence" / "qualification-binding.json").write_text(
-            json.dumps({"tag_commit": "c" * 40, "run_id": "123",
-                        "qualification_url": "https://example.invalid/q",
-                        "qualification_subject": "s" * 40}),
-            encoding="utf-8")
         script = tmp / "predicate.sh"
         script.write_text(block, encoding="utf-8")
         env = dict(os.environ)
         env.update({"RELEASE_TAG": "v9.9.9",
+                    "TAG_COMMIT": "c" * 40,
+                    "CANDIDATE_RUN_ID": "123",
                     "GITHUB_OUTPUT": str(tmp / "outputs.txt")})
         proc = subprocess.run(["bash", str(script)], cwd=tmp, env=env,
                               text=True, capture_output=True, timeout=60)
@@ -1098,10 +1064,10 @@ class ReleaseRecoveryTests(unittest.TestCase):
 
 
 class ReleasePublicationTests(unittest.TestCase):
-    def test_final_publication_is_protected_write_only(self):
+    def test_final_publication_is_unprotected_write_only(self):
         workflow = load_workflow(RELEASE_YML)
         job = workflow["jobs"]["publish"]
-        self.assertEqual(job.get("environment"), "release")
+        self.assertIsNone(job.get("environment"))
         self.assertEqual(job.get("permissions", {}).get("contents"), "write")
         writers = [job_id for job_id, other in workflow["jobs"].items()
                    if other.get("permissions", {}).get("contents") == "write"]
@@ -1334,12 +1300,7 @@ class WorkflowPinTests(unittest.TestCase):
 
 TAG_COMMIT = "6b151b799b59bce4a06f6cb993f8a74a84ae0481"
 RUN_ID = "12345678"
-QUAL_URL = "https://example.invalid/qual/rec-42"
-QUAL_SUBJECT = "abc123def456abc123def456abc123def456abcd"
-QUAL_RUN_ID = "37423315928"
-QUAL_FRAMEWORK = "c" * 40
-QUAL_RECORD_SHA = "1" * 64
-QUAL_RECEIPT_SHA = "2" * 64
+
 
 
 class CandidateEvidenceTests(unittest.TestCase):
@@ -1369,90 +1330,11 @@ class CandidateEvidenceTests(unittest.TestCase):
                 self.assertEqual(
                     release_checks.main(["candidate-name", *args], repo=ROOT), 1)
 
-    def write_binding(self, **overrides):
-        binding = self.workdir / "binding.json"
-        args = ["evidence-bind", "--output", str(binding),
-                "--tag-commit", TAG_COMMIT, "--run-id", RUN_ID,
-                "--qualification-url", QUAL_URL,
-                "--qualification-subject", QUAL_SUBJECT,
-                "--qualification-receipt-sha256", QUAL_RECEIPT_SHA,
-                "--qualification-record-sha256", QUAL_RECORD_SHA,
-                "--qualification-run-id", QUAL_RUN_ID,
-                "--qualification-framework", QUAL_FRAMEWORK]
-        for key, value in overrides.items():
-            flag = "--" + key.replace("_", "-")
-            index = args.index(flag)
-            args[index + 1] = value
-        self.assertEqual(release_checks.main(args, repo=ROOT), 0)
-        return binding
-
-    def test_evidence_bind_writes_exact_binding(self):
-        binding = self.write_binding()
-        payload = json.loads(binding.read_text(encoding="utf-8"))
-        self.assertEqual(payload["format_version"], 2)
-        self.assertEqual(payload["tag_commit"], TAG_COMMIT)
-        self.assertEqual(payload["run_id"], RUN_ID)
-        self.assertEqual(payload["qualification_url"], QUAL_URL)
-        self.assertEqual(payload["qualification_subject"], QUAL_SUBJECT)
-        self.assertEqual(payload["qualification_receipt_sha256"],
-                         QUAL_RECEIPT_SHA)
-        self.assertEqual(payload["qualification_record_sha256"],
-                         QUAL_RECORD_SHA)
-        self.assertEqual(payload["qualification_run_id"], QUAL_RUN_ID)
-        self.assertEqual(payload["qualification_framework"], QUAL_FRAMEWORK)
-
-    def test_evidence_bind_refuses_non_https_url(self):
-        binding = self.workdir / "binding.json"
-        code = release_checks.main(
-            ["evidence-bind", "--output", str(binding),
-             "--tag-commit", TAG_COMMIT, "--run-id", RUN_ID,
-             "--qualification-url", "http://example.invalid/qual",
-             "--qualification-subject", QUAL_SUBJECT,
-             "--qualification-receipt-sha256", QUAL_RECEIPT_SHA,
-             "--qualification-record-sha256", QUAL_RECORD_SHA,
-             "--qualification-run-id", QUAL_RUN_ID,
-             "--qualification-framework", QUAL_FRAMEWORK], repo=ROOT)
-        self.assertEqual(code, 1)
-        self.assertFalse(binding.exists())
-
-    def verify(self, binding, **overrides):
-        args = ["evidence-verify", "--binding", str(binding),
-                "--expect-url", QUAL_URL, "--expect-subject", QUAL_SUBJECT,
-                "--expect-tag-commit", TAG_COMMIT,
-                "--expect-run-id", RUN_ID,
-                "--expect-receipt-sha256", QUAL_RECEIPT_SHA,
-                "--expect-record-sha256", QUAL_RECORD_SHA,
-                "--expect-qual-run-id", QUAL_RUN_ID,
-                "--expect-framework", QUAL_FRAMEWORK]
-        for key, value in overrides.items():
-            flag = "--" + key.replace("_", "-")
-            index = args.index(flag)
-            args[index + 1] = value
-        return release_checks.main(args, repo=ROOT)
-
-    def test_evidence_verify_accepts_exact_binding(self):
-        self.assertEqual(self.verify(self.write_binding()), 0)
-
-    def test_evidence_verify_refuses_wrong_binding(self):
-        binding = self.write_binding()
-        cases = ({"expect_url": QUAL_URL + "/other"},
-                 {"expect_subject": "0" * 40},
-                 {"expect_tag_commit": "0" * 40},
-                 {"expect_run_id": "999"},
-                 {"expect_receipt_sha256": "0" * 64},
-                 {"expect_record_sha256": "0" * 64},
-                 {"expect_qual_run_id": "999"},
-                 {"expect_framework": "0" * 40})
-        for overrides in cases:
-            with self.subTest(overrides=overrides):
-                self.assertEqual(self.verify(binding, **overrides), 1)
-
-    def test_evidence_verify_refuses_missing_or_malformed(self):
-        missing = self.workdir / "absent.json"
-        self.assertEqual(self.verify(missing), 1)
-        broken = self.workdir / "broken.json"
-        broken.write_text("{not json", encoding="utf-8")
-        self.assertEqual(self.verify(broken), 1)
+    def test_evidence_binding_surface_is_removed(self):
+        from release import package_evidence
+        self.assertFalse(hasattr(package_evidence, "write_binding"))
+        self.assertFalse(hasattr(package_evidence, "read_binding"))
+        self.assertFalse(hasattr(package_evidence, "verify_binding"))
 
 
 def run_record(**overrides):
@@ -1647,7 +1529,8 @@ class ReleaseDocsAccuracyTests(unittest.TestCase):
         start = text.index("The published release contains")
         item = text[start:text.index("\n\n", start)]
         self.assertIn("`inventory.json`", item)
-        self.assertIn("`qualification-binding.json`", item)
+        self.assertIn("`assets.json`", item)
+        self.assertNotIn("qualification", item)
         self.assertNotIn("SHA256SUMS", text)
 
     def test_guide_scopes_dry_run_to_guards_ci_candidate(self):

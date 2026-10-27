@@ -1,5 +1,10 @@
-"""Release ref and qualification refusal cases against real Git histories."""
+"""Release ref refusal cases against real Git histories.
 
+Provider-qualification inputs were removed in 0.3.1 (no approvals, no
+evidence); preflight validates ref/mode/package/tag/receipt only.
+"""
+
+import inspect
 import io
 import json
 from contextlib import redirect_stderr
@@ -77,21 +82,23 @@ class RefFixture(unittest.TestCase):
         return release_checks.main(["preflight", "--ref", "refs/tags/v0.2.0",
                                     "--require-main", *args], repo=self.repo)
 
-    def qual_identity(self):
-        return ("--qualification-run-id", "37423315928",
-                "--qualification-framework", "c" * 40,
-                "--qualification-record-sha256", "1" * 64,
-                "--qualification-receipt-sha256", "2" * 64)
-
-    def test_accepts_annotated_clean_main_tag_and_upload_qualification(self):
+    def test_accepts_annotated_clean_main_tag_in_every_mode(self):
         self.assertEqual(self.check(), 0)
-        self.assertEqual(self.check("--mode", "trusted", "--package", PACKAGES[0][0],
-                                    "--qualification-subject", self.subject,
-                                    "--qualification-url", "https://example.invalid/qualification",
-                                    *self.qual_identity()), 0)
-        self.assertEqual(self.check("--mode", "bootstrap", "--qualification-subject", self.subject,
-                                    "--qualification-url", "https://example.invalid/qualification",
-                                    *self.qual_identity()), 0)
+        self.assertEqual(self.check("--mode", "trusted", "--package", PACKAGES[0][0]), 0)
+        self.assertEqual(self.check("--mode", "bootstrap"), 0)
+
+    def test_upload_modes_need_no_qualification(self):
+        for mode in ("trusted", "bootstrap"):
+            with self.subTest(mode=mode):
+                self.assertEqual(self.check("--mode", mode), 0)
+
+    def test_preflight_signature_has_no_qualification_params(self):
+        sys.path.insert(0, str(ROOT / "scripts"))
+        from release import package_refs
+        params = inspect.signature(package_refs.preflight).parameters
+        self.assertNotIn("qualification_subject", params)
+        self.assertNotIn("qualification_url_value", params)
+        self.assertNotIn("qualification_run_id", params)
 
     def test_rejects_bad_refs_and_tag_topologies(self):
         for ref in ("v0.2.0", "refs/heads/main", "refs/tags/v0.2.0-rc1",
@@ -130,45 +137,8 @@ class RefFixture(unittest.TestCase):
         (self.repo / "untracked").write_text("x")
         self.assertEqual(self.check(), 1)
 
-    def test_rejects_invalid_package_mode_and_qualification(self):
-        self.assertEqual(release_checks.main(
-            ["preflight", "--ref", "refs/tags/v0.2.0", "--mode", "trusted",
-             "--qualification-subject", self.subject,
-             "--qualification-url", "https://example.invalid/q"], repo=self.repo), 1)
-        upload = ("--mode", "trusted", "--qualification-subject", self.subject,
-                  "--qualification-url", "https://example.invalid/q")
-        for args in (("--package", "surprise"), ("--mode", "release"),
-                     ("--mode", "trusted"),
-                     ("--mode", "trusted", "--qualification-subject", self.subject),
-                     ("--mode", "trusted", "--qualification-url", "https://example.invalid/q"),
-                     ("--mode", "trusted", "--qualification-subject", "0" * 40,
-                      "--qualification-url", "https://example.invalid/q"),
-                     ("--mode", "trusted", "--qualification-subject", self.subject,
-                      "--qualification-url", "http://example.invalid/q"),
-                     ("--mode", "trusted", "--qualification-subject", self.subject,
-                      "--qualification-url", "https://user:secret@example.invalid/q"),
-                     ("--mode", "trusted", "--qualification-subject", self.subject,
-                      "--qualification-url", "https:///missing-host"),
-                     # URL-only qualification no longer suffices: upload
-                     # modes require the full qualification identity.
-                     upload,
-                     upload + self.qual_identity()[:2],
-                     upload + self.qual_identity()[:4],
-                     upload + self.qual_identity()[:6],
-                     # Malformed identity values refuse in any mode.
-                     ("--qualification-run-id", "0"),
-                     ("--qualification-run-id", "abc"),
-                     ("--qualification-framework", "short"),
-                     ("--qualification-record-sha256", "1" * 63),
-                     ("--qualification-receipt-sha256", "zz" + "2" * 62),
-                     upload + ("--qualification-run-id", "0",
-                               "--qualification-framework", "c" * 40,
-                               "--qualification-record-sha256", "1" * 64,
-                               "--qualification-receipt-sha256", "2" * 64),
-                     upload + ("--qualification-run-id", "37423315928",
-                               "--qualification-framework", "short",
-                               "--qualification-record-sha256", "1" * 64,
-                               "--qualification-receipt-sha256", "2" * 64)):
+    def test_rejects_invalid_package_and_mode(self):
+        for args in (("--package", "surprise"), ("--mode", "release")):
             with self.subTest(args=args):
                 self.assertNotEqual(self.check(*args), 0)
 
