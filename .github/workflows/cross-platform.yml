@@ -231,9 +231,18 @@ jobs:
       #   phases (22 passed / 0 failed direct==proxied; run 35471555621,
       #   ubuntu job 105973304853). Supersedes the 7027433 parity
       #   exclusion and the CI review M-1 /tmp-only citation.
+      # - test_decrypt_garbage: provider-flaky on native SoftHSM 2.6.1,
+      #   fails the gate in EITHER lane without the proxy (direct-lane
+      #   local repro: CKR_OK + out_len=0 for the RSA-PKCS decrypt-zero
+      #   edge, ~1/50 lane-runs; the norm is CKR_OK + deterministic
+      #   nonzero, xfailed as honest_deviation). Killed main xplat run
+      #   40371481094 (ubuntu-X64, proxied exit 1) on a tree identical
+      #   to green run 40364748954. Excluded from the parity gate until
+      #   pkcs11-check/SoftHSM disposes the edge; the proxy forwards the
+      #   backend bytes verbatim either way. Revisit on pin bump.
       - name: Direct-vs-proxied comparison
         env:
-          EXTRA_P11CHECK_ARGS: '--match "(not test_ckr_digest) and (not test_ckr_keygen) and (not test_ckr_sign) and (not test_ckr_verify) and (not test_arithmetic_overflow) and (not test_cve_regression) and (not test_ffi_length_boundary) and (not test_padding_oracle) and (not test_parameter_validation) and (not test_scalar_attr_length_extended) and (not test_tookan) and (not test_mech_negative) and (not test_operation_termination) and (not test_set_attribute or test_set_attribute_after_destroy or test_set_attribute_token_object_in_ro_fails) and (not test_verify_operability) and (not (test_ckr_decrypt and test_key_type_inconsistent)) and (not (test_ckr_encrypt and test_key_size_range)) and (not test_bad_mechanism_with_bad_key_size) and (not (test_null_template_nonzero_count and C_GenerateKey)) and (not test_dh_rejects_tiny_prime) and (not test_eddsa_context_mismatch_does_not_verify) and (not test_eddsa_pure_and_ctx_modes_do_not_cross_verify) and (not test_eddsa_ph_mode_does_not_cross_verify) and (not test_edwards25519_ctx_null_pointer_roundtrip) and (not test_edwards25519_ctx_empty_bytes_roundtrip)"'
+          EXTRA_P11CHECK_ARGS: '--match "(not test_ckr_digest) and (not test_ckr_keygen) and (not test_ckr_sign) and (not test_ckr_verify) and (not test_arithmetic_overflow) and (not test_cve_regression) and (not test_ffi_length_boundary) and (not test_padding_oracle) and (not test_parameter_validation) and (not test_scalar_attr_length_extended) and (not test_tookan) and (not test_mech_negative) and (not test_operation_termination) and (not test_set_attribute or test_set_attribute_after_destroy or test_set_attribute_token_object_in_ro_fails) and (not test_verify_operability) and (not (test_ckr_decrypt and test_key_type_inconsistent)) and (not (test_ckr_encrypt and test_key_size_range)) and (not test_bad_mechanism_with_bad_key_size) and (not (test_null_template_nonzero_count and C_GenerateKey)) and (not test_dh_rejects_tiny_prime) and (not test_eddsa_context_mismatch_does_not_verify) and (not test_eddsa_pure_and_ctx_modes_do_not_cross_verify) and (not test_eddsa_ph_mode_does_not_cross_verify) and (not test_edwards25519_ctx_null_pointer_roundtrip) and (not test_edwards25519_ctx_empty_bytes_roundtrip) and (not test_decrypt_garbage)"'
         run: python3 scripts/ci-direct-vs-proxy.py
         shell: bash
 

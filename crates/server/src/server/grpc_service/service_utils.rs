@@ -2755,10 +2755,26 @@ mod tests {
 
     #[tokio::test]
     async fn fast_call_never_counts_as_stuck() {
-        let baseline = stuck_backend_calls();
-        let result = spawn_backend(|| Ok(7u8)).await;
-        assert_eq!(result.expect("ok").unwrap(), 7);
-        assert_eq!(stuck_backend_calls(), baseline);
+        // Dedicated counters keep this hermetic: the global STUCK_CALLS
+        // gauge is legitimately moved by concurrently running tests, so
+        // asserting global quiescence flakes on loaded runners (observed
+        // on win32 i686: baseline 1, end 0 after a neighbor resolved).
+        static FAST_TEST_COUNTER: AtomicUsize = AtomicUsize::new(0);
+        static FAST_TEST_GAUGE: AtomicUsize = AtomicUsize::new(0);
+        let result = spawn_backend_core(
+            &FAST_TEST_COUNTER,
+            &FAST_TEST_GAUGE,
+            backend_timeout(),
+            max_concurrent_backend_calls(),
+            || Ok(7u8),
+        )
+        .await;
+        assert_eq!(result.expect("no transport error").unwrap(), 7);
+        assert_eq!(
+            FAST_TEST_GAUGE.load(Ordering::Relaxed),
+            0,
+            "a fast call must never be counted stuck"
+        );
     }
 
     #[tokio::test]
