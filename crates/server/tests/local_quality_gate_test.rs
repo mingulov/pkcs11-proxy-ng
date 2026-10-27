@@ -1170,6 +1170,10 @@ const XPLAT_PINNED_EXCLUSIONS: &[&str] = &[
     "test_eddsa_ph_mode_does_not_cross_verify",
     "test_edwards25519_ctx_null_pointer_roundtrip",
     "test_edwards25519_ctx_empty_bytes_roundtrip",
+    // Provider-flaky on native SoftHSM 2.6.1 (CKR_OK + empty output for
+    // the RSA-PKCS decrypt-zero edge, ~1/50 lane-runs; reproduced in the
+    // direct lane without the proxy). Killed main xplat 40371481094.
+    "test_decrypt_garbage",
 ];
 
 #[test]
