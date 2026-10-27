@@ -2,7 +2,7 @@
 
 The smoke contract is reusable: the same entry points verify
 archive-built bundles in CI today and registry release bundles before
-GitHub asset approval later. Provider-dependent paths (real SoftHSM
+GitHub asset publication later. Provider-dependent paths (real SoftHSM
 token, daemon start, pkcs11-tool / cross_width_smoke execution) are
 exercised through mocks here and at runtime on CI runners.
 """

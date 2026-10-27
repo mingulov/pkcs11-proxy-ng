@@ -29,7 +29,7 @@ then proves real provider operations through them:
   installed daemon/shim/CLI paths (the Alpine installed lane).
 
 The same contract verifies registry release bundles after publication,
-before GitHub asset approval. All artifact paths are explicit required
+before GitHub asset publication. All artifact paths are explicit required
 arguments: there is no default and no fallback.
 
 The daemon always runs a shipped template with only named
