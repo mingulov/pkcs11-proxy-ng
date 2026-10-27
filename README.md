@@ -9,15 +9,14 @@ connected to the token or HSM, preserving the backend's results within the
 app ──dlopen──▶ libpkcs11_proxy_ng_shim.so ──gRPC/TLS──▶ pkcs11-proxy-ng (daemon) ──FFI──▶ backend .so (HSM/token)
 ```
 
-> **Current source version: `v<!-- SYNC-VERSION -->0.3.0<!-- /SYNC-VERSION -->`.**
+> **Current source version: `v<!-- SYNC-VERSION -->0.3.1<!-- /SYNC-VERSION -->`.**
 >
-> Latest published release: [v0.3.0](https://github.com/mingulov/pkcs11-proxy-ng/releases/tag/v0.3.0)
-> (2026-10-27; [release notes](./doc/release/v0.3.0-release-notes.md)).
-> It carries over v0.2.2 the stabilization increments — the engineering-audit
-> remediation campaign, passive CLI diagnostics, the generated support-matrix
-> table, and release attestation/recovery tooling. Provider-matrix
-> qualification continues toward v0.3.1 per the [`0.x` release
-> checklist](./doc/release/0.x-beta-release-checklist.md).
+> Latest published release: [v0.3.1](https://github.com/mingulov/pkcs11-proxy-ng/releases/tag/v0.3.1)
+> (2026-10-27; [release notes](./doc/release/v0.3.1-release-notes.md)).
+> It carries over v0.3.0 a release-process change only — no environment
+> approvals and no provider-qualification evidence on the release path
+> (see the notes). The provider-matrix qualification planned for this
+> version did not land; support claims are unchanged from v0.3.0.
 See
 [GitHub Releases](https://github.com/mingulov/pkcs11-proxy-ng/releases) for
 published versions, the [support matrix](./doc/release/beta-support-matrix.md)
@@ -118,9 +117,11 @@ resilience, and audit increments (see the [v0.2.0
 notes](./doc/release/v0.2.0-release-notes.md)). `v0.3.0` adds the
 stabilization increments on top — the audit-remediation campaign plus
 passive CLI diagnostics, the generated support-matrix table, release
-attestation/recovery tooling, and experimental platform legs. Matrix
-qualification for the released tree continues toward v0.3.1 (see the
-[v0.3.0 notes](./doc/release/v0.3.0-release-notes.md) for scope and limits).
+attestation/recovery tooling, and experimental platform legs. `v0.3.1`
+changes only the release process on top of that (see the
+[v0.3.1 notes](./doc/release/v0.3.1-release-notes.md) for scope and limits);
+the planned matrix qualification did not land, so support claims are
+unchanged from v0.3.0.
 
 ## Documentation
 
@@ -179,8 +180,8 @@ Use `--prefix /tmp/pkcs11-proxy-ng-install` to keep the staged layout, or
 Eight crates publish at one synchronized version with exact `=X.Y.Z`
 internal requirements (mirrored from the workspace version — see
 `scripts/sync-versions.sh`). Four are user-facing entry points;
-the rest resolve automatically as dependencies. Version `0.3.0` is
-published; the current checkout tracks post-`v0.3.0` work.
+the rest resolve automatically as dependencies. Version `0.3.1` is
+published; the current checkout tracks post-`v0.3.1` work.
 
 ```bash
 cargo install pkcs11-proxy-ng --locked        # daemon

@@ -109,7 +109,11 @@ jobs:
           python-version: "3.12"
 
       - name: Install pkcs11-check (pinned)
-        run: pip install "pkcs11-check==${P11CHECK_VERSION}"
+        # pytest>=9.2 removed the private `_nodeid` attribute that the
+        # latest pytest-benchmark (5.3.0) relies on, which errors every
+        # test_benchmark setup (run 40627243360). Hold pytest below 9.2
+        # until benchmark ships a fix, then drop the upper bound.
+        run: pip install "pkcs11-check==${P11CHECK_VERSION}" "pytest<9.2"
         shell: bash
 
       - name: Install SoftHSM2 (Linux)
