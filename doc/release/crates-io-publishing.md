@@ -184,7 +184,11 @@ retired contracts stay in
 [qualification-binding-contract.md](./qualification-binding-contract.md)
 and
 [environment-protection-contract.md](./environment-protection-contract.md),
-restorable from history if a gated flow is ever needed again).
+restorable from history if a gated flow is ever needed again). One
+name remains: the upload job declares the *unprotected* `crates-io`
+environment solely so the OIDC JWT carries the environment claim the
+crates.io trust records require — it approves nothing, and adding
+protection rules to it would reintroduce per-release approvals.
 
 - First publication uses `bootstrap` mode with the
   `CARGO_REGISTRY_BOOTSTRAP_TOKEN` secret. Afterwards, configure one
