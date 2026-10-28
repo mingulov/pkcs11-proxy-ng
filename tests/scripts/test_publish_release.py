@@ -150,9 +150,9 @@ class PublishJobBoundaryTests(unittest.TestCase):
         # The upload job declares the `crates-io` environment solely so
         # the OIDC JWT carries the environment claim the crates.io
         # trust records require (run 40638623530 failed with 400
-        # without it). The environment must carry no protection rules:
-        # no reviewers, no gates — the dispatcher is the sole
-        # authorizer and this declaration approves nothing.
+        # without it). The environment must carry no required reviewers
+        # (the automatic tag branch policy may stay) — the dispatcher
+        # is the sole authorizer and this declaration approves nothing.
         workflow = load_workflow(PUBLISH_YML)
         upload = workflow["jobs"]["upload"]
         self.assertEqual(upload.get("environment"), "crates-io")
