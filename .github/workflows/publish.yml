@@ -261,9 +261,10 @@ jobs:
     if: github.event_name == 'workflow_dispatch' && inputs.mode != 'dry-run'
     # Claim only, not approval: the crates.io trust records require the
     # `crates-io` environment on the OIDC JWT (run 40638623530 failed
-    # with 400 without it). This environment must carry NO protection
-    # rules — no reviewers, no gates; adding any reintroduces
-    # per-release approvals the 0.3.1 simplification removed.
+    # with 400 without it). This environment must carry NO required
+    # reviewers — the automatic tag branch policy may stay; adding
+    # reviewers reintroduces per-release approvals the 0.3.1
+    # simplification removed.
     environment: crates-io
     permissions:
       id-token: write
