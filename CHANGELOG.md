@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- Bump pulldown-cmark to 0.13.6 for RUSTSEC-2026-0414
+  (exponential event growth with `ENABLE_WIKILINKS`, fixed in
+  0.13.5). The crate reaches the proxy only as a prost-build
+  build-time dependency: prost-build parses .proto doc comments
+  with wikilinks enabled, but the input is the repository's own
+  trusted schema files, never untrusted Markdown. Root + fuzz
+  locks only.
+
 ## [0.3.1] - 2026-10-27
 
 v0.3.1 is a release-process release with no proxy behavior changes: it
