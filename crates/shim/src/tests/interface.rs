@@ -1277,8 +1277,11 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CapturedWriter {
 
 fn capture_logs(f: impl FnOnce()) -> String {
     let writer = CapturedWriter::default();
+    // No timestamps: the assertions only inspect message content, and
+    // SystemTime::now() is rejected under Miri isolation.
     let subscriber = tracing_subscriber::fmt()
         .with_max_level(tracing::Level::TRACE)
+        .without_time()
         .with_writer(writer.clone())
         .finish();
     tracing::subscriber::with_default(subscriber, f);
