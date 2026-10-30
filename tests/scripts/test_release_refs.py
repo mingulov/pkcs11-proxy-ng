@@ -12,6 +12,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -37,7 +38,7 @@ def git(repo, *args):
 class RefFixture(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.temp.cleanup)
+        self.addCleanup(self._cleanup_tempdir)
         self.repo = Path(self.temp.name)
         git(self.repo, "init", "-q", "-b", "main")
         git(self.repo, "config", "user.name", "Fixture")
@@ -77,6 +78,19 @@ class RefFixture(unittest.TestCase):
         self.head = git(self.repo, "rev-parse", "HEAD")
         git(self.repo, "tag", "-a", "v0.2.0", "-m", "release")
         git(self.repo, "update-ref", "refs/remotes/origin/main", self.head)
+
+    def _cleanup_tempdir(self):
+        # Teardown-only hardening: hosted CI once removed the fixture
+        # repo while git still held .git/objects (ENOTEMPTY), failing an
+        # otherwise green test. Retry instead of failing the gate.
+        for attempt in range(3):
+            try:
+                self.temp.cleanup()
+                return
+            except OSError:
+                if attempt == 2:
+                    raise
+                time.sleep(0.5)
 
     def check(self, *args):
         return release_checks.main(["preflight", "--ref", "refs/tags/v0.2.0",
