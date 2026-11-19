@@ -1174,6 +1174,20 @@ const XPLAT_PINNED_EXCLUSIONS: &[&str] = &[
     // the RSA-PKCS decrypt-zero edge, ~1/50 lane-runs; reproduced in the
     // direct lane without the proxy). Killed main xplat 40371481094.
     "test_decrypt_garbage",
+    // pkcs11-check 0.3.0 atoms 27-30 (qualified 2026-11-19 on SoftHSM
+    // 2.6.1: 10 red direct, identical 10 red proxied, 0 other
+    // divergences across 83,166 nodes). All four are provider-side:
+    // SoftHSM leaks refused C_CreateObject objects (malformed missing-*
+    // templates, HIGH/lifecycle; forbidden CKA_MODULUS_BITS,
+    // HIGH/metadata), defaults omitted CKA_EXTRACTABLE to False
+    // (MEDIUM/policy), and reports an impossible CKA_ECDSA_PARAMS length
+    // on generated Edwards keys (MEDIUM/metadata). The conjunctions keep
+    // every passing instance admitted (the malformed atom also matches a
+    // pqc instance that skips on SoftHSM).
+    "(test_create_malformed_template and missing)",
+    "test_omitted_extractable_defaults_true_and_wrappable",
+    "test_create_with_modulus_bits_rejected",
+    "(test_sealed_components_unavailable and edwards and gen)",
 ];
 
 #[test]
