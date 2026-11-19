@@ -1188,6 +1188,18 @@ const XPLAT_PINNED_EXCLUSIONS: &[&str] = &[
     "test_omitted_extractable_defaults_true_and_wrappable",
     "test_create_with_modulus_bits_rejected",
     "(test_sealed_components_unavailable and edwards and gen)",
+    // pkcs11-check 0.3.0 atoms 31-34: macOS-only reds (Linux SoftHSM
+    // 2.6.1 skips every instance for unsupported mechanisms; brew
+    // SoftHSM runs them — 31 red direct, identical 31 red proxied).
+    // Corrected sensitivity verdicts catch brew SoftHSM contradicting
+    // derived histories / accepting downgrade (HIGH/metadata); unique-id
+    // override refusals leak the object (same shape as atom 29). The
+    // whole inheritance_base_and_key name goes (23/27 red, passing
+    // params inseparable via -k) with 4 passes as documented collateral.
+    "test_inheritance_base_and_key",
+    "(test_inheritance_single_source and downgrade)",
+    "test_unique_id_override_rejected_on_create",
+    "test_unique_id_override_rejected_on_generate_and_copy",
 ];
 
 #[test]
