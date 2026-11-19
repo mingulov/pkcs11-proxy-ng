@@ -56,7 +56,9 @@ env:
   # SoftHSM 2.6.1 (83,166 nodes; 10 direct-phase provider reds, 0
   # direct/proxied divergences — identical 10-fail sets plus differential
   # 0 disagreements across 46,318 comparable KAT node-ids; the 10 reds
-  # are excluded as atoms 27-30).
+  # are excluded as atoms 27-30). The macOS leg adds atoms 31-34: brew
+  # SoftHSM runs byte-KDF/unique-id tests Linux skips (mechanism
+  # unsupported), and 31 fail direct there with identical proxied sets.
   P11CHECK_VERSION: "0.3.0"
 
 jobs:
@@ -193,7 +195,7 @@ jobs:
       # proxy in the loop (direct-phase red, provider crash, or
       # direct==proxied parity); proxy bugs are never excluded.
       # W1-L17-09: this list is gated — local_quality_gate_test
-      # xplat_exclusion_list_matches_pinned_record pins all 30 atoms, so
+      # xplat_exclusion_list_matches_pinned_record pins all 34 atoms, so
       # any add/remove fails until the pinned record + justification move
       # together (exclusion edits trip review). The KAT-only residual stays
       # narrowed explicitly (see scripts/ci-direct-vs-proxy.py); the
@@ -271,9 +273,26 @@ jobs:
       #   the edwards-gen-sensitive-only/both/extractable-only params).
       #   The conjunction keeps the other 27 passing matrix instances
       #   admitted, including edwards-import-*.
+      # - 4 macOS-only nodes, new in pkcs11-check 0.3.0 (atoms 31-34;
+      #   Linux SoftHSM 2.6.1 skips every instance — mechanism
+      #   unsupported — while brew SoftHSM runs them: 31 red direct,
+      #   identical 31 red proxied, 0 other divergences):
+      #   test_inheritance_base_and_key (whole name): the corrected 0.3.0
+      #   sensitivity verdicts catch brew SoftHSM contradicting derived
+      #   sensitivity histories / accepting downgrade (HIGH/metadata,
+      #   23/27 red). The 4 passing params share every substring token
+      #   with failing ones, so no -k conjunction isolates them — the
+      #   whole name goes, with the 4 passes as documented collateral.
+      #   (test_inheritance_single_source and downgrade): downgrade
+      #   requests accepted (HIGH/metadata, 6 red); the atom also matches
+      #   EXTRACT/XOR downgrade instances, which skip on SoftHSM.
+      #   test_unique_id_override_rejected_on_create and
+      #   test_unique_id_override_rejected_on_generate_and_copy: refusal
+      #   CKR_ATTRIBUTE_TYPE_INVALID leaves an object behind (same leak
+      #   shape as atom 29; single instances).
       - name: Direct-vs-proxied comparison
         env:
-          EXTRA_P11CHECK_ARGS: '--match "(not test_ckr_digest) and (not test_ckr_keygen) and (not test_ckr_sign) and (not test_ckr_verify) and (not test_arithmetic_overflow) and (not test_cve_regression) and (not test_ffi_length_boundary) and (not test_padding_oracle) and (not test_parameter_validation) and (not test_scalar_attr_length_extended) and (not test_tookan) and (not test_mech_negative) and (not test_operation_termination) and (not test_set_attribute or test_set_attribute_after_destroy or test_set_attribute_token_object_in_ro_fails) and (not test_verify_operability) and (not (test_ckr_decrypt and test_key_type_inconsistent)) and (not (test_ckr_encrypt and test_key_size_range)) and (not test_bad_mechanism_with_bad_key_size) and (not (test_null_template_nonzero_count and C_GenerateKey)) and (not test_dh_rejects_tiny_prime) and (not test_eddsa_context_mismatch_does_not_verify) and (not test_eddsa_pure_and_ctx_modes_do_not_cross_verify) and (not test_eddsa_ph_mode_does_not_cross_verify) and (not test_edwards25519_ctx_null_pointer_roundtrip) and (not test_edwards25519_ctx_empty_bytes_roundtrip) and (not test_decrypt_garbage) and (not (test_create_malformed_template and missing)) and (not test_omitted_extractable_defaults_true_and_wrappable) and (not test_create_with_modulus_bits_rejected) and (not (test_sealed_components_unavailable and edwards and gen))"'
+          EXTRA_P11CHECK_ARGS: '--match "(not test_ckr_digest) and (not test_ckr_keygen) and (not test_ckr_sign) and (not test_ckr_verify) and (not test_arithmetic_overflow) and (not test_cve_regression) and (not test_ffi_length_boundary) and (not test_padding_oracle) and (not test_parameter_validation) and (not test_scalar_attr_length_extended) and (not test_tookan) and (not test_mech_negative) and (not test_operation_termination) and (not test_set_attribute or test_set_attribute_after_destroy or test_set_attribute_token_object_in_ro_fails) and (not test_verify_operability) and (not (test_ckr_decrypt and test_key_type_inconsistent)) and (not (test_ckr_encrypt and test_key_size_range)) and (not test_bad_mechanism_with_bad_key_size) and (not (test_null_template_nonzero_count and C_GenerateKey)) and (not test_dh_rejects_tiny_prime) and (not test_eddsa_context_mismatch_does_not_verify) and (not test_eddsa_pure_and_ctx_modes_do_not_cross_verify) and (not test_eddsa_ph_mode_does_not_cross_verify) and (not test_edwards25519_ctx_null_pointer_roundtrip) and (not test_edwards25519_ctx_empty_bytes_roundtrip) and (not test_decrypt_garbage) and (not (test_create_malformed_template and missing)) and (not test_omitted_extractable_defaults_true_and_wrappable) and (not test_create_with_modulus_bits_rejected) and (not (test_sealed_components_unavailable and edwards and gen)) and (not test_inheritance_base_and_key) and (not (test_inheritance_single_source and downgrade)) and (not test_unique_id_override_rejected_on_create) and (not test_unique_id_override_rejected_on_generate_and_copy)"'
         run: python3 scripts/ci-direct-vs-proxy.py
         shell: bash
 
